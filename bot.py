@@ -622,7 +622,8 @@ async def process_train_add(callback: CallbackQuery):
     char_profile["unspent_points"] -= 1
     char_profile["bonus_stats"][stat_to_add] += 1
     
-    # We cheat a little bit here: We just re-call the exact same screen to refresh the UI!
+    # 🟢 FIX: Overwrite the callback data before forwarding so it extracts the name correctly!
+    callback.data = f"trainselect:{char_name}"
     await process_train_select(callback)
 
 @router.callback_query(F.data.startswith("trainreset:"))
@@ -653,6 +654,9 @@ async def process_train_reset(callback: CallbackQuery):
         char_profile["bonus_stats"][stat] = 0
         
     await callback.answer("🔄 Build successfully reset!", show_alert=True)
+    
+    # 🟢 FIX: Overwrite the callback data here too!
+    callback.data = f"trainselect:{char_name}"
     await process_train_select(callback)
 
 @router.callback_query(F.data == "menu_arena")
@@ -894,6 +898,7 @@ async def process_match_defense(callback: CallbackQuery):
             match["possession"] = "player"
             match["ball_carrier"] = match["player_team"][0]
             match["log"] = "\n".join(log_msgs) + f"\n🥅 <b>GOAL CONCEDED!</b> {carrier} blasts it into your net! ({ai_power} vs {def_power})"
+
         elif ai_action == "pass":
             # AI passes to a random teammate
             ai_receiver = random.choice([p for p in match["ai_team"] if p != carrier])
@@ -901,22 +906,22 @@ async def process_match_defense(callback: CallbackQuery):
             match["log"] = "\n".join(log_msgs) + f"\n❌ <b>DEFENSE BROKEN!</b> {carrier} passes to {ai_receiver}."
             
             # AI defensive line pushes down
-            if ai_receiver != "AI_GK": # 🟢 FIX: AI GK never moves!
+            if ai_receiver != "AI_GK": 
                 r, c = match["positions"][ai_receiver]
-                if r < 5: 
+                # 🟢 FIX 2: Restrict AI field players to row 4!
+                if r < 4: 
                     new_pos = (r+1, c)
-                    # 🟢 FIX: Only move if empty
                     if new_pos not in match["positions"].values():
                         match["positions"][ai_receiver] = new_pos
                         
         elif ai_action == "dribble":
             match["log"] = "\n".join(log_msgs) + f"\n❌ <b>ANKLES BROKEN!</b> {carrier} blows past {defender}!"
             
-            if carrier != "AI_GK": # 🟢 FIX: AI GK never moves!
+            if carrier != "AI_GK": 
                 r, c = match["positions"][carrier]
-                if r < 5: 
+                # 🟢 FIX 2: Restrict AI to row 4!
+                if r < 4: 
                     target_pos = (r+1, c)
-                    # 🟢 FIX: Swap places with the defender
                     for char, pos in match["positions"].items():
                         if pos == target_pos:
                             match["positions"][char] = (r, c)
@@ -945,8 +950,11 @@ async def process_arena_start_ai(callback: CallbackQuery):
             show_alert=True
         )
         
-    ai_team = random.sample(list(master_characters.keys()), 5)
     player_team_list = list(user_data["active_team"].values())
+    
+    # 🟢 FIX 1: Remove your active players from the AI's draft pool!
+    available_ai_pool = [char for char in master_characters.keys() if char not in player_team_list]
+    ai_team = random.sample(available_ai_pool, 5)
     
     positions = {
         "AI_GK": (0, 1),
