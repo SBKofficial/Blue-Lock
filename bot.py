@@ -604,108 +604,119 @@ async def process_menu_arena(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-def render_match_ui(user_id, show_pass_menu=False):
+def render_match_ui(user_id):
     match = active_matches[user_id]
-    user_data = users_db[user_id]
     
-    # --- SCOREBOARD HEADER ---
     header = (
         f"📊 <b>SCORE: [ BHARAT {match['player_score']} - {match['ai_score']} AI ]</b>\n"
-        f"📍 <b>ZONE: {match['zone'].upper()}</b>\n"
+        f"🔋 <b>EGO GAUGE: {match['ego_gauge']}%</b>\n"
         f"⏱️ <b>TURN: {match['turn']}</b>\n"
         "〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n"
     )
-    
-    # --- SUB-MENU: PASSING SELECTION ---
-    if show_pass_menu:
+
+    if match["ui_state"] == "overview":
+        text = header + f"{match['log']}\n\n<i>Tap your ball carrier (⚽) to make a play, or tap any player to view stats.</i>"
+        
+        # 🟢 GENERATE THE 3x6 PITCH KEYBOARD 🟢
         buttons = []
-        for teammate in match["player_team"]:
-            if teammate != match["player_active"]:
-                teammate_pass = master_characters[teammate]["pass"] + user_data["roster"][teammate]["bonus_stats"]["pass"]
-                buttons.append([InlineKeyboardButton(text=f"⚽ Pass to {teammate} (Pass: {teammate_pass})", callback_data=f"match_exec_pass_{teammate}")])
-        buttons.append([InlineKeyboardButton(text="🔙 CANCEL PASS", callback_data="match_cancel_pass")])
-        
-        text = header + f"<i>Scanning the field... Who is {match['player_active']} passing to?</i>"
+        for row in range(6):
+            row_buttons = []
+            for col in range(3):
+                # Handle the Goal Posts (Corners of Row 0 and Row 5)
+                if (row == 0 or row == 5) and (col == 0 or col == 2):
+                    row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
+                    continue
+                
+                # Check if anyone is standing on this (row, col)
+                occupant = None
+                for char, pos in match["positions"].items():
+                    if pos == (row, col):
+                        occupant = char
+                        break
+                
+                if occupant:
+                    # Determine icon based on team
+                    if occupant == "AI_GK":
+                        btn_text = "🧤 AI GK"
+                    elif occupant == "Player_GK":
+                        btn_text = "🧤 Your GK"
+                    elif occupant in match["player_team"]:
+                        # Add ball icon if they are the carrier
+                        prefix = "⚽ 🟢 " if occupant == match["ball_carrier"] else "🟢 "
+                        btn_text = f"{prefix}{occupant}"
+                    else:
+                        prefix = "⚽ 🔴 " if occupant == match["ball_carrier"] else "🔴 "
+                        btn_text = f"{prefix}{occupant}"
+                        
+                    # Callback data sends the character name they tapped
+                    row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_tap_{occupant}"))
+                else:
+                    # Empty space
+                    row_buttons.append(InlineKeyboardButton(text="⬛️", callback_data="ignore"))
+                    
+            buttons.append(row_buttons)
+            
+        buttons.append([InlineKeyboardButton(text="🏳️ FORFEIT MATCH", callback_data="match_forfeit")])
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    # --- MAIN MENUS ---
-    if match["possession"] == "player":
-        carrier = match["player_active"]
-        defender = match["ai_active"]
         
-        c_prof = user_data["roster"][carrier]
-        c_dri = master_characters[carrier]["dribble"] + c_prof["bonus_stats"]["dribble"]
-        c_sht = master_characters[carrier]["shoot"] + c_prof["bonus_stats"]["shoot"]
-        d_def = master_characters[defender]["defense"]
-        
-        role_text = "🟢 <b>YOU HAVE POSSESSION</b>"
-        prompt = f"🏃‍♂️ <b>Carrier:</b> {carrier}\n🛡️ <b>Defender:</b> {defender} (DEF: {d_def})\n\n<i>What is your move?</i>"
-        
-        if match["zone"] == "Midfield":
-            buttons = [
-                [InlineKeyboardButton(text=f"⚡ DRIBBLE ({c_dri})", callback_data="match_exec_dribble"),
-                 InlineKeyboardButton(text="👁️ PASS", callback_data="match_intent_pass")]
-            ]
-        else: # Penalty Area
-            buttons = [
-                [InlineKeyboardButton(text=f"🎯 POWER SHOOT ({c_sht})", callback_data="match_exec_shoot"),
-                 InlineKeyboardButton(text="👁️ PASS", callback_data="match_intent_pass")],
-                [InlineKeyboardButton(text=f"⚡ DRIBBLE ({c_dri})", callback_data="match_exec_dribble")]
-            ]
-            
-    else: # AI has possession
-        carrier = match["ai_active"]
-        defender = match["player_active"]
-        
-        d_prof = user_data["roster"][defender]
-        d_def = master_characters[defender]["defense"] + d_prof["bonus_stats"]["defense"]
-        
-        role_text = "🔴 <b>AI HAS POSSESSION</b>"
-        prompt = f"🏃‍♂️ <b>Enemy Carrier:</b> {carrier}\n🛡️ <b>Your Defender:</b> {defender} (DEF: {d_def})\n\n<i>Predict their move!</i>"
-        
-        if match["zone"] == "Midfield":
-            buttons = [
-                [InlineKeyboardButton(text="🛑 BLOCK DRIBBLE", callback_data="match_defend_dribble"),
-                 InlineKeyboardButton(text="🦅 CUT PASS", callback_data="match_defend_pass")]
-            ]
-        else: # Penalty Area
-            buttons = [
-                [InlineKeyboardButton(text="🧱 BLOCK SHOT", callback_data="match_defend_shoot"),
-                 InlineKeyboardButton(text="🦅 CUT PASS", callback_data="match_defend_pass")]
-            ]
-            
-    buttons.append([InlineKeyboardButton(text="🏳️ FORFEIT MATCH", callback_data="match_forfeit")])
-    
-    text = f"{header}{role_text}\n\n{match['log']}\n\n{prompt}"
-    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
-
+    # We will build "action" and "targeting" states in Phase 2
+    return header, InlineKeyboardMarkup(inline_keyboard=[])
 
 @router.callback_query(F.data == "arena_start_ai")
 async def process_arena_start_ai(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_data = users_db[user_id]
     
+    # Randomly select 5 characters for the AI
     ai_team = random.sample(list(master_characters.keys()), 5)
+    player_team = user_data["active_team"]
     
+    # 🗺️ THE COORDINATE SYSTEM (Row, Col)
+    # Rows: 0 to 5 (0 is AI Goal, 5 is Player Goal)
+    # Cols: 0 to 2 (0 is Left, 1 is Center, 2 is Right)
+    
+    positions = {
+        # AI Goalkeeper (Row 0)
+        "AI_GK": (0, 1),
+        # AI Defense/Midfield (Rows 1 & 2)
+        ai_team[0]: (1, 1), ai_team[1]: (1, 0), ai_team[2]: (1, 2),
+        ai_team[3]: (2, 1), ai_team[4]: (2, 2),
+        
+        # Player Midfield/Defense (Rows 3 & 4)
+        player_team[0]: (3, 1), player_team[1]: (3, 0), player_team[2]: (3, 2),
+        player_team[3]: (4, 1), player_team[4]: (4, 2),
+        # Player Goalkeeper (Row 5)
+        "Player_GK": (5, 1)
+    }
+    
+    # Initialize Stamina for all players
+    stamina = {char: 100 for char in player_team + ai_team}
+
     active_matches[user_id] = {
         "status": "active",
         "player_score": 0,
         "ai_score": 0,
         "turn": 1,
         "possession": "player",
-        "zone": "Midfield",
-        "player_team": user_data["active_team"],
+        "ball_carrier": player_team[0], # The player at (3, 1) starts with the ball
+        "player_team": player_team,
         "ai_team": ai_team,
-        "player_active": user_data["active_team"][0],
-        "ai_active": ai_team[0],
-        "log": "<i>The whistle blows! You have the kickoff.</i>"
+        "positions": positions,
+        "stamina": stamina,
+        "ego_gauge": 0,
+        "log": "<i>The whistle blows! You have the kickoff.</i>",
+        "ui_state": "overview" # Can be: overview, action, targeting
     }
     
     user_data["in_match"] = True
+    
     text, kb = render_match_ui(user_id)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("Match started!", show_alert=True)
-    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@router.callback_query(F.data == "ignore")
+async def process_ignore(callback: CallbackQuery):
+    await callback.answer()
 
 @router.callback_query(F.data == "match_intent_pass")
 async def process_match_intent_pass(callback: CallbackQuery):
