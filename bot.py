@@ -114,11 +114,11 @@ async def process_draft_team(callback: CallbackQuery):
         
         # 🟢 NEW: Start with a completely empty pitch!
         "active_team": {
-            "FW": "Empty",
-            "MF_L": "Empty",
-            "MF_R": "Empty",
-            "DF": "Empty",
-            "GK": "Empty"
+            "FW": None,
+            "MF_L": None,
+            "MF_R": None,
+            "DF": None,
+            "GK": None
         },
         "in_match": False
     }
@@ -167,7 +167,8 @@ async def display_stats_ui(message: Message, user_id: int, char_name: str):
     
     text = (
         f"{rarity_stars} <b>{char_data['name']}</b> (Lv.{char_profile['level']})\n"
-        f"🧬 <b>Variant:</b> <i>{char_data['variant']}</i>\n\n"
+        f"🧬 <b>Variant:</b> <i>{char_data['variant']}</i>\n"
+        f"📍 <b>Natural Position:</b> {char_data['position']}\n\n"
         "📊 <b>CURRENT ATTRIBUTES (Base + Bonus):</b>\n"
         f"👟 <b>Speed:</b> {tot_spd}\n"
         f"🎯 <b>Shoot:</b> {tot_sht}\n"
@@ -336,8 +337,7 @@ async def process_swap_init(callback: CallbackQuery):
     roles = {"FW": "Striker", "MF_L": "Left Mid", "MF_R": "Right Mid", "DF": "Defense", "GK": "Goalkeeper"}
     
     for slot_key, slot_name in roles.items():
-        current_player = active_team.get(slot_key, "Empty")
-        # 🟢 FIX: Use colons (:) to separate the data safely!
+        current_player = active_team.get(slot_key) or "Empty"
         callback_string = f"swap_confirm:{char_to_swap_in}:{slot_key}"
         buttons.append([InlineKeyboardButton(text=f"🔁 {slot_name} (Bench {current_player})", callback_data=callback_string)])
 
@@ -365,11 +365,11 @@ async def process_swap_confirm(callback: CallbackQuery):
     if user_data.get("in_match"):
         return await callback.answer("❌ You cannot substitute players while an Arena match is active!", show_alert=True)
     
-    # 🟢 FIX: The Clone Exploit (Remove them from their old slot if they exist)
-    for existing_slot, existing_char in active_team.items():
-        if existing_char == char_in:
-            active_team[existing_slot] = "Empty"
-            
+    # Remove player from any existing slot first
+    for existing_slot in active_team:
+        if active_team[existing_slot] == char_in:
+            active_team[existing_slot] = None
+
     char_out = active_team.get(slot_key)
     
     # Execute the swap
@@ -528,13 +528,13 @@ async def process_menu_train(callback: CallbackQuery):
     buttons = []
     # 🟢 FIX: Iterate over values() and ignore "Empty" slots
     for char_name in active_team.values():
-        if char_name == "Empty":
+        if not char_name:
             continue
             
         # Look up their unspent points safely
         unspent = user_data["roster"][char_name]["unspent_points"]
         btn_text = f"⭐ {char_name} ({unspent} Pts)"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"train_select_{char_name}")])
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"trainselect:{char_name}")])
         
     buttons.append([InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")])
     
@@ -542,13 +542,13 @@ async def process_menu_train(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("train_select_"))
+@router.callback_query(F.data.startswith("trainselect:"))
 async def process_train_select(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in users_db:
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
-    char_name = callback.data.split("_", 2)[2] 
+    char_name = callback.data.split(":", 1)[1]
     user_data = users_db[user_id]
     
     char_data = master_characters[char_name]
@@ -580,13 +580,13 @@ async def process_train_select(callback: CallbackQuery):
     
     # Generate the stat addition buttons
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ SPEED", callback_data=f"train_add_speed_{char_name}"),
-         InlineKeyboardButton(text="➕ SHOOT", callback_data=f"train_add_shoot_{char_name}")],
-        [InlineKeyboardButton(text="➕ EGO", callback_data=f"train_add_ego_{char_name}"),
-         InlineKeyboardButton(text="➕ PASS", callback_data=f"train_add_pass_{char_name}")],
-        [InlineKeyboardButton(text="➕ DEFENSE", callback_data=f"train_add_defense_{char_name}"),
-         InlineKeyboardButton(text="➕ DRIBBLE", callback_data=f"train_add_dribble_{char_name}")],
-        [InlineKeyboardButton(text="🔄 RESET BUILD (500 Cash)", callback_data=f"train_reset_{char_name}")],
+        [InlineKeyboardButton(text="➕ SPEED", callback_data=f"trainadd:speed:{char_name}"),
+         InlineKeyboardButton(text="➕ SHOOT", callback_data=f"trainadd:shoot:{char_name}")],
+        [InlineKeyboardButton(text="➕ EGO", callback_data=f"trainadd:ego:{char_name}"),
+         InlineKeyboardButton(text="➕ PASS", callback_data=f"trainadd:pass:{char_name}")],
+        [InlineKeyboardButton(text="➕ DEFENSE", callback_data=f"trainadd:defense:{char_name}"),
+         InlineKeyboardButton(text="➕ DRIBBLE", callback_data=f"trainadd:dribble:{char_name}")],
+        [InlineKeyboardButton(text="🔄 RESET BUILD (500 Cash)", callback_data=f"trainreset:{char_name}")],
         [InlineKeyboardButton(text="🔙 BACK TO FACILITY", callback_data="menu_train")]
     ])
     
@@ -594,16 +594,15 @@ async def process_train_select(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("train_add_"))
+@router.callback_query(F.data.startswith("trainadd:"))
 async def process_train_add(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    # 🟢 FIX: Use maxsplit=3 -> ['train', 'add', 'speed', 'Wanima_J']
-    parts = callback.data.split("_", 3) 
-    stat_to_add = parts[2] 
-    char_name = parts[3]   
+    parts = callback.data.split(":")
+    stat_to_add = parts[1]
+    char_name = parts[2]
     
     user_data = users_db[user_id]
     char_profile = user_data["roster"][char_name]
@@ -622,14 +621,13 @@ async def process_train_add(callback: CallbackQuery):
     # We cheat a little bit here: We just re-call the exact same screen to refresh the UI!
     await process_train_select(callback)
 
-
-@router.callback_query(F.data.startswith("train_reset_"))
+@router.callback_query(F.data.startswith("trainreset:"))
 async def process_train_reset(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    char_name = callback.data.split("_", 2)[2]
+    char_name = callback.data.split(":", 1)[1]
     user_data = users_db[user_id]
     char_profile = user_data["roster"][char_name]
     
@@ -896,8 +894,7 @@ async def process_arena_start_ai(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_data = users_db[user_id]
     
-    # 🟢 NEW: The Formation Check
-    if "Empty" in user_data["active_team"].values():
+    if any(v is None for v in user_data["active_team"].values()):
         return await callback.answer(
             "❌ INCOMPLETE SQUAD!\n\nYou must assign 5 players to your formation before entering the Arena. Go to [⚽ MY TEAM] to set up.", 
             show_alert=True
@@ -1132,7 +1129,7 @@ async def end_match(callback: CallbackQuery, user_id: int, win: bool):
         # --- XP & LEVEL UP LOGIC ---
         for char_name in user_data["active_team"].values():
             # 🟢 FIX: Safeguard against empty slots crashing the dictionary lookup
-            if char_name == "Empty":
+            if not char_name:
                 continue
                 
             char_profile = user_data["roster"][char_name]
