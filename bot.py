@@ -14,6 +14,7 @@ BOT_TOKEN = "8543296575:AAGsAL_exd_D2MZAmUMMPXF-KjleyKPSj3M"
 
 # Mock Database (RAM Cache)
 users_db = {}
+active_matches = {}
 
 # Router setup
 router = Router()
@@ -581,6 +582,293 @@ async def process_train_reset(callback: CallbackQuery):
         
     await callback.answer("🔄 Build successfully reset!", show_alert=True)
     await process_train_select(callback)
+
+@router.callback_query(F.data == "menu_arena")
+async def process_menu_arena(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    text = (
+        "🏟️ <b>BLUE LOCK ARENA</b>\n\n"
+        "Welcome to the battlefield. Here, only your Ego and your stats matter.\n\n"
+        "<i>Select your matchmaking queue:</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 AI PRACTICE (SOLO)", callback_data="arena_start_ai")],
+        [InlineKeyboardButton(text="👥 RANKED MATCH (COMING SOON)", callback_data="none")],
+        [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+def render_match_ui(user_id):
+    """Helper function to draw the match screen based on current state."""
+    match = active_matches[user_id]
+    user_data = users_db[user_id]
+    
+    # Identify who is acting
+    if match["possession"] == "player":
+        carrier = match["player_active"]
+        defender = match["ai_active"]
+        
+        # Grab stats (simplified for the AI to just use base stats for now)
+        carrier_profile = user_data["roster"][carrier]
+        c_dri = master_characters[carrier]["dribble"] + carrier_profile["bonus_stats"]["dribble"]
+        c_pas = master_characters[carrier]["pass"] + carrier_profile["bonus_stats"]["pass"]
+        c_sht = master_characters[carrier]["shoot"] + carrier_profile["bonus_stats"]["shoot"]
+        d_def = master_characters[defender]["defense"]
+        
+        role_text = "🟢 <b>YOU HAVE POSSESSION</b>"
+        prompt = f"🏃‍♂️ <b>Carrier:</b> {carrier}\n🛡️ <b>Defender:</b> {defender} (DEF: {d_def})\n\n<i>What is your move?</i>"
+        
+        if match["zone"] == "Midfield":
+            buttons = [
+                [InlineKeyboardButton(text=f"⚡ DRIBBLE ({c_dri})", callback_data="match_action_dribble"),
+                 InlineKeyboardButton(text=f"👁️ PASS ({c_pas})", callback_data="match_action_pass")]
+            ]
+        else: # Penalty Area
+            buttons = [
+                [InlineKeyboardButton(text=f"🎯 SHOOT ({c_sht})", callback_data="match_action_shoot"),
+                 InlineKeyboardButton(text=f"👁️ PASS ({c_pas})", callback_data="match_action_pass")]
+            ]
+            
+    else: # AI has possession (Player is defending)
+        carrier = match["ai_active"]
+        defender = match["player_active"]
+        
+        defender_profile = user_data["roster"][defender]
+        d_def = master_characters[defender]["defense"] + defender_profile["bonus_stats"]["defense"]
+        
+        role_text = "🔴 <b>AI HAS POSSESSION</b>"
+        prompt = f"🏃‍♂️ <b>Enemy Carrier:</b> {carrier}\n🛡️ <b>Your Defender:</b> {defender} (DEF: {d_def})\n\n<i>Predict their move and intercept!</i>"
+        
+        if match["zone"] == "Midfield":
+            buttons = [
+                [InlineKeyboardButton(text="🛑 BLOCK DRIBBLE", callback_data="match_defend_block_dribble"),
+                 InlineKeyboardButton(text="🦅 CUT PASS", callback_data="match_defend_cut_pass")]
+            ]
+        else: # Penalty Area
+            buttons = [
+                [InlineKeyboardButton(text="🧱 BLOCK SHOT", callback_data="match_defend_block_shoot"),
+                 InlineKeyboardButton(text="🦅 CUT PASS", callback_data="match_defend_cut_pass")]
+            ]
+            
+    # Add a forfeit button
+    buttons.append([InlineKeyboardButton(text="🏳️ FORFEIT MATCH", callback_data="match_forfeit")])
+    
+    text = (
+        f"📍 <b>ZONE: {match['zone'].upper()}</b>\n"
+        f"{role_text}\n\n"
+        f"{match['log']}\n\n"
+        f"{prompt}"
+    )
+    
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data == "arena_start_ai")
+async def process_arena_start_ai(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_data = users_db[user_id]
+    
+    # Randomly select 5 characters for the AI from the master list
+    ai_team = random.sample(list(master_characters.keys()), 5)
+    
+    # Initialize the Match State
+    active_matches[user_id] = {
+        "status": "active",
+        "possession": "player", # Player always kicks off in PvE
+        "zone": "Midfield",
+        "player_team": user_data["active_team"],
+        "ai_team": ai_team,
+        "player_active": user_data["active_team"][0],
+        "ai_active": ai_team[0],
+        "log": "<i>The whistle blows! You have the kickoff.</i>"
+    }
+    
+    # Set manager in-match status
+    user_data["in_match"] = True
+    
+    text, kb = render_match_ui(user_id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer("Match started!", show_alert=True)
+
+@router.callback_query(F.data.startswith("match_action_") | F.data.startswith("match_defend_"))
+async def process_match_turn(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in active_matches:
+        return await callback.answer("Match expired or not found.", show_alert=True)
+        
+    match = active_matches[user_id]
+    user_data = users_db[user_id]
+    
+    player_action = callback.data.split("_")[2] # 'dribble', 'pass', 'shoot', 'block', 'cut'
+    
+    # --- GET ACTIVE STATS ---
+    p_char = match["player_active"]
+    p_prof = user_data["roster"][p_char]
+    ai_char = match["ai_active"]
+    
+    # Base stats + Bonus stats for Player
+    p_stats = {
+        "dribble": master_characters[p_char]["dribble"] + p_prof["bonus_stats"]["dribble"],
+        "pass": master_characters[p_char]["pass"] + p_prof["bonus_stats"]["pass"],
+        "shoot": master_characters[p_char]["shoot"] + p_prof["bonus_stats"]["shoot"],
+        "defense": master_characters[p_char]["defense"] + p_prof["bonus_stats"]["defense"]
+    }
+    # Base stats for AI
+    ai_stats = master_characters[ai_char]
+    
+    # --- AI RANDOM DECISION ---
+    if match["possession"] == "player":
+        # AI is defending
+        ai_choices = ["block_dribble", "cut_pass"] if match["zone"] == "Midfield" else ["block_shoot", "cut_pass"]
+        ai_action = random.choice(ai_choices)
+        
+        # Calculate offensive power
+        offense_power = p_stats[player_action]
+        defense_power = ai_stats["defense"]
+        
+        # Apply Prediction Multipliers
+        if (player_action == "dribble" and ai_action == "block_dribble") or \
+           (player_action == "pass" and ai_action == "cut_pass") or \
+           (player_action == "shoot" and ai_action == "block_shoot"):
+            # AI guessed right! Massive boost to AI defense.
+            defense_power = int(defense_power * 1.5)
+            clash_msg = f"The AI read your play and attempted to {ai_action.replace('_', ' ')}!"
+        else:
+            # AI guessed wrong! Offense gets a slight boost.
+            offense_power = int(offense_power * 1.2)
+            clash_msg = f"You faked out the AI! They expected a different move."
+            
+        # --- RESOLVE CLASH ---
+        if offense_power > defense_power:
+            # Attacker Wins
+            if match["zone"] == "Midfield":
+                match["zone"] = "Penalty Area"
+                match["log"] = f"✅ <b>CLASH WON!</b> ({offense_power} vs {defense_power})\n{clash_msg}\n<i>{p_char} breaks through to the Penalty Area!</i>"
+            else:
+                # Goal Scored!
+                match["log"] = f"⚽ <b>GOAL!!!</b> ({offense_power} vs {defense_power})\n{clash_msg}\n<i>{p_char} slams it into the back of the net! YOU WIN!</i>"
+                return await end_match(callback, user_id, win=True)
+        else:
+            # Defender Wins (Turnover)
+            match["possession"] = "ai"
+            match["zone"] = "Midfield"
+            match["player_active"] = random.choice(match["player_team"])
+            match["ai_active"] = random.choice(match["ai_team"])
+            match["log"] = f"❌ <b>TURNOVER!</b> ({offense_power} vs {defense_power})\n{clash_msg}\n<i>{ai_char} steals the ball! The AI is counter-attacking!</i>"
+
+    else:
+        # Player is defending
+        ai_choices = ["dribble", "pass"] if match["zone"] == "Midfield" else ["shoot", "pass"]
+        ai_action = random.choice(ai_choices)
+        
+        offense_power = ai_stats[ai_action]
+        defense_power = p_stats["defense"]
+        
+        # We need to map the player's button press to the AI's action
+        predicted_correctly = False
+        if (callback.data == "match_defend_block_dribble" and ai_action == "dribble") or \
+           (callback.data == "match_defend_cut_pass" and ai_action == "pass") or \
+           (callback.data == "match_defend_block_shoot" and ai_action == "shoot"):
+            predicted_correctly = True
+            
+        if predicted_correctly:
+            defense_power = int(defense_power * 1.5)
+            clash_msg = f"Perfect read! You moved to stop their {ai_action}!"
+        else:
+            offense_power = int(offense_power * 1.2)
+            clash_msg = f"Misread! The AI chose to {ai_action}!"
+
+        # --- RESOLVE CLASH ---
+        if defense_power > offense_power:
+            # Player Wins Defense (Turnover)
+            match["possession"] = "player"
+            match["zone"] = "Midfield"
+            match["player_active"] = random.choice(match["player_team"])
+            match["ai_active"] = random.choice(match["ai_team"])
+            match["log"] = f"✅ <b>INTERCEPTION!</b> (DEF: {defense_power} vs OFF: {offense_power})\n{clash_msg}\n<i>{p_char} steals the ball! You are on the attack!</i>"
+        else:
+            # AI Wins Offense
+            if match["zone"] == "Midfield":
+                match["zone"] = "Penalty Area"
+                match["log"] = f"❌ <b>DEFENSE BROKEN!</b> (DEF: {defense_power} vs OFF: {offense_power})\n{clash_msg}\n<i>The AI advances to your Penalty Area!</i>"
+            else:
+                # AI Scores
+                match["log"] = f"🥅 <b>GOAL CONCEDED!</b> (DEF: {defense_power} vs OFF: {offense_power})\n{clash_msg}\n<i>The AI scores. You lose.</i>"
+                return await end_match(callback, user_id, win=False)
+                
+    # Re-render UI with new state
+    text, kb = render_match_ui(user_id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+async def end_match(callback: CallbackQuery, user_id: int, win: bool):
+    match = active_matches[user_id]
+    user_data = users_db[user_id]
+    
+    # Free the manager
+    user_data["in_match"] = False
+    
+    level_up_log = ""
+    
+    if win:
+        user_data["cash"] += 500
+        user_data["ep"] += 150
+        reward_txt = "🏆 <b>VICTORY!</b>\n\nRewards: 💵 +500 Cash, 💎 +150 EP\n📈 <b>Team gained +50 EXP!</b>\n"
+        
+        # --- XP & LEVEL UP LOGIC ---
+        for char_name in user_data["active_team"]:
+            char_profile = user_data["roster"][char_name]
+            char_base_data = master_characters[char_name]
+            
+            max_level = RARITY_CAPS[char_base_data['rarity']]
+            
+            # Only give XP if they haven't hit their rarity level cap
+            if char_profile["level"] < max_level:
+                char_profile["exp"] += 50
+                
+                # Calculate required EXP for next level: 100 * (1.5 ^ (level - 1))
+                req_exp = int(100 * (1.5 ** (char_profile["level"] - 1)))
+                
+                if char_profile["exp"] >= req_exp:
+                    char_profile["level"] += 1
+                    char_profile["exp"] -= req_exp  # Carry over excess EXP
+                    char_profile["unspent_points"] += 3
+                    level_up_log += f"\n🆙 <b>{char_name}</b> leveled up to Lv.{char_profile['level']}! (+3 Stat Pts)"
+                    
+    else:
+        user_data["cash"] += 50
+        reward_txt = "💀 <b>DEFEAT.</b>\n\nRewards: 💵 +50 Cash (Consolation)"
+        
+    text = (
+        f"{match['log']}\n\n"
+        f"⚽ <b>MATCH CONCLUDED</b>\n"
+        f"{reward_txt}"
+        f"{level_up_log}"
+    )
+    
+    del active_matches[user_id]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 RETURN TO FACILITY", callback_data="menu_main")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "match_forfeit")
+async def process_match_forfeit(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id in active_matches:
+        active_matches[user_id]["log"] = "<i>You surrendered to the AI.</i>"
+        await end_match(callback, user_id, win=False)
+    else:
+        await callback.answer("No active match.", show_alert=True)
 
 async def on_startup(bot: Bot):
     print("⚙️ Running Facility Maintenance (Startup Hook)...")
