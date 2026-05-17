@@ -669,9 +669,9 @@ async def process_train_add(callback: CallbackQuery):
     char_profile["unspent_points"] -= 1
     char_profile["bonus_stats"][stat_to_add] += 1
     
-    # 🟢 FIX: Overwrite the callback data before forwarding so it extracts the name correctly!
-    callback.data = f"trainselect:{char_name}"
-    await process_train_select(callback)
+    # 🟢 FIX: Create a modified copy of the frozen callback object!
+    new_callback = callback.model_copy(update={"data": f"trainselect:{char_name}"})
+    await process_train_select(new_callback)
 
 @router.callback_query(F.data.startswith("trainreset:"))
 async def process_train_reset(callback: CallbackQuery):
@@ -695,17 +695,17 @@ async def process_train_reset(callback: CallbackQuery):
     # Execute the reset
     user_data["cash"] -= 500
     char_profile["unspent_points"] += total_spent
-    
+
     # Zero out all bonus stats
     for stat in char_profile["bonus_stats"]:
         char_profile["bonus_stats"][stat] = 0
         
     await callback.answer("🔄 Build successfully reset!", show_alert=True)
     
-    # 🟢 FIX: Overwrite the callback data here too!
-    callback.data = f"trainselect:{char_name}"
-    await process_train_select(callback)
-
+    # 🟢 FIX: Create a modified copy of the frozen callback object!
+    new_callback = callback.model_copy(update={"data": f"trainselect:{char_name}"})
+    await process_train_select(new_callback)
+    
 @router.callback_query(F.data == "menu_arena")
 async def process_menu_arena(callback: CallbackQuery):
     user_id = callback.from_user.id
