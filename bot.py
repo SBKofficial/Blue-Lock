@@ -1,6 +1,7 @@
 import random
 import asyncio
 import logging
+import difflib
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import CommandStart, Command, CommandObject
@@ -110,13 +111,14 @@ async def process_draft_team(callback: CallbackQuery):
         "ep": 10000,
         "cash": 0,
         "roster": roster_dict,
-        # 🟢 NEW: The Formation Dictionary
+        
+        # 🟢 NEW: Start with a completely empty pitch!
         "active_team": {
-            "FW": starting_team[0],
-            "MF_L": starting_team[1],
-            "MF_R": starting_team[2],
-            "DF": starting_team[3],
-            "GK": starting_team[4]
+            "FW": "Empty",
+            "MF_L": "Empty",
+            "MF_R": "Empty",
+            "DF": "Empty",
+            "GK": "Empty"
         },
         "in_match": False
     }
@@ -133,44 +135,27 @@ async def process_draft_team(callback: CallbackQuery):
 
     text += (
         "\n📖 <b>MANAGER'S SURVIVAL GUIDE:</b>\n"
-        "<b>1. View Stats:</b> Check your [📋 Roster] to see their individual weapons.\n"
-        "<b>2. The Arena:</b> Enter the [🏟️ Arena] to battle other managers.\n"
-        "<b>3. Evolve:</b> Use EP at the Selection Gate to pull S-Rank prodigies."
+        "<b>1. Set Your Formation:</b> Your pitch is currently empty! Go to [⚽ MY TEAM] to assign your 5 players to their positions.\n"
+        "<b>2. View Stats:</b> Check your [📋 Roster] to see their individual weapons.\n"
+        "<b>3. The Arena:</b> Enter the [🏟️ Arena] to battle other managers once your team is set."
     )
     
     await callback.message.edit_text(text, reply_markup=get_draft_success_kb())
     await callback.answer()
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message, command: CommandObject):
-    user_id = message.from_user.id
-    
-    if user_id not in users_db:
-        await message.answer("System Error: Manager not found. Please send /start.")
-        return
-    
-    if not command.args:
-        await message.answer("⚠️ <b>Error:</b> Please provide a character name. (Usage: <code>/stats Bachira</code>)")
-        return
-    
-    char_name = command.args.capitalize()
+async def display_stats_ui(message: Message, user_id: int, char_name: str):
+    """Helper function to render and send the stats UI so we can use it from commands AND buttons."""
     user_data = users_db[user_id]
     
-    if char_name not in master_characters:
-        await message.answer(f"⚠️ <b>Error:</b> {char_name} does not exist in the Blue Lock database.")
-        return
-        
     if char_name not in user_data.get("roster", {}):
         await message.answer(f"❌ <b>Error:</b> You do not own {char_name}. Head to the Selection Gate to draft them.")
         return
         
-    # Grab both the base template AND the player's unique profile
     char_data = master_characters[char_name]
     char_profile = user_data["roster"][char_name] 
     
     rarity_stars = "⭐" * char_data['rarity']
     
-    # Calculate Total Stats = Base + Bonus
     tot_spd = char_data['speed'] + char_profile['bonus_stats']['speed']
     tot_sht = char_data['shoot'] + char_profile['bonus_stats']['shoot']
     tot_ego = char_data['ego'] + char_profile['bonus_stats']['ego']
@@ -206,6 +191,59 @@ async def cmd_stats(message: Message, command: CommandObject):
         ])
         
     await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    
+    if user_id not in users_db:
+        return await message.answer("System Error: Manager not found. Please send /start.")
+    
+    if not command.args:
+        return await message.answer("⚠️ <b>Error:</b> Please provide a character name. (Usage: <code>/stats Bachira</code>)")
+    
+    # Clean the user's input and make it lowercase
+    query = command.args.strip().lower()
+    
+    # 1. Try an Exact Case-Insensitive Match First
+    char_name = next((k for k in master_characters.keys() if k.lower() == query), None)
+    
+    # 2. If no exact match, trigger the "Funky" Fuzzy Matching
+    if not char_name:
+        keys_lower = [k.lower() for k in master_characters.keys()]
+        # Find the closest match with a minimum similarity cutoff of 40%
+        matches = difflib.get_close_matches(query, keys_lower, n=1, cutoff=0.4)
+        
+        if matches:
+            # Grab the proper case-sensitive key from the database
+            closest_char = next(k for k in master_characters.keys() if k.lower() == matches[0])
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"🔍 YES, SHOW {closest_char.upper()}", callback_data=f"stats_fuzzy_{closest_char}")]
+            ])
+            return await message.answer(f"⚠️ <b>Character Not Found.</b>\n\nDid you mean <b>{closest_char}</b>?", reply_markup=kb)
+        else:
+            return await message.answer(f"⚠️ <b>Error:</b> No character found matching '{command.args}'.")
+            
+    # 3. If exact match found, render stats immediately
+    await display_stats_ui(message, user_id, char_name)
+
+
+@router.callback_query(F.data.startswith("stats_fuzzy_"))
+async def process_stats_fuzzy(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    char_name = callback.data.split("_", 2)[2]
+    
+    # Clean up the chat by deleting the "Did you mean?" message
+    await callback.message.delete()
+    
+    # Render the actual stats
+    await display_stats_ui(callback.message, user_id, char_name)
+    await callback.answer()
 
 @router.callback_query(F.data == "menu_main")
 async def process_menu_main(callback: CallbackQuery):
@@ -254,9 +292,10 @@ async def process_menu_team(callback: CallbackQuery):
     
     for role_key, role_name in roles:
         char_name = active_team.get(role_key)
+        
+        # 🟢 FIX: Show the empty slots correctly!
         if char_name and char_name in master_characters:
             char_data = master_characters[char_name]
-            # Warning if playing out of position!
             pos_warning = "⚠️" if char_data.get('position') != role_key.split('_')[0] else "✅"
             
             power = (char_data['pass'] + char_data['dribble'] + char_data['shoot'] + char_data['defense'] + char_data['speed'] + char_data['ego']) // 6
@@ -264,6 +303,8 @@ async def process_menu_team(callback: CallbackQuery):
             
             text += f"<b>{role_name}:</b> {pos_warning} {char_name} (OVR: {power})\n"
             text += f"└ <i>Natural: {char_data.get('position', 'UNK')} | {char_data['variant']}</i>\n\n"
+        else:
+            text += f"<b>{role_name}:</b> ⚠️ EMPTY\n└ <i>Assign a player to this slot!</i>\n\n"
 
     text += f"📊 <b>TOTAL SQUAD OVR: {total_power}</b>\n"
     text += "<i>⚠️ Note: Playing out of position will reduce a player's stats in the Arena!</i>"
@@ -296,29 +337,42 @@ async def process_swap_init(callback: CallbackQuery):
     
     for slot_key, slot_name in roles.items():
         current_player = active_team.get(slot_key, "Empty")
-        callback_string = f"swap_confirm_{char_to_swap_in}_{slot_key}"
+        # 🟢 FIX: Use colons (:) to separate the data safely!
+        callback_string = f"swap_confirm:{char_to_swap_in}:{slot_key}"
         buttons.append([InlineKeyboardButton(text=f"🔁 {slot_name} (Bench {current_player})", callback_data=callback_string)])
-        
+
     buttons.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="menu_main")])
     
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("swap_confirm_"))
+@router.callback_query(F.data.startswith("swap_confirm:")) 
 async def process_swap_confirm(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    parts = callback.data.split("_")
-    char_in = parts[2]
-    slot_key = parts[3] # e.g., 'FW' or 'MF_L'
+    # 🟢 FIX: Split by colon!
+    parts = callback.data.split(":") 
+    char_in = parts[1]
+    slot_key = parts[2] 
     
-    active_team = users_db[user_id]["active_team"]
+    user_data = users_db[user_id]
+    active_team = user_data["active_team"]
+    
+    # 🟢 FIX: Prevent Mid-Match Swapping
+    if user_data.get("in_match"):
+        return await callback.answer("❌ You cannot substitute players while an Arena match is active!", show_alert=True)
+    
+    # 🟢 FIX: The Clone Exploit (Remove them from their old slot if they exist)
+    for existing_slot, existing_char in active_team.items():
+        if existing_char == char_in:
+            active_team[existing_slot] = "Empty"
+            
     char_out = active_team.get(slot_key)
     
-    # Execute the swap into the specific role slot
+    # Execute the swap
     active_team[slot_key] = char_in
         
     text = (
@@ -462,7 +516,7 @@ async def process_menu_train(callback: CallbackQuery):
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
     user_data = users_db[user_id]
-    active_team = user_data.get("active_team", [])
+    active_team = user_data.get("active_team", {}) # 🟢 Changed default to dictionary
     
     text = (
         "🏋️ <b>BLUE LOCK PHYSICAL TRAINING CENTER</b>\n\n"
@@ -471,12 +525,15 @@ async def process_menu_train(callback: CallbackQuery):
         "Select a player from your Active Team to allocate stats:"
     )
     
-    # Generate a button for each active player
     buttons = []
-    for char_name in active_team:
+    # 🟢 FIX: Iterate over values() and ignore "Empty" slots
+    for char_name in active_team.values():
+        if char_name == "Empty":
+            continue
+            
+        # Look up their unspent points safely
         unspent = user_data["roster"][char_name]["unspent_points"]
         btn_text = f"⭐ {char_name} ({unspent} Pts)"
-        # callback format: train_select_Bachira
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"train_select_{char_name}")])
         
     buttons.append([InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")])
@@ -491,7 +548,7 @@ async def process_train_select(callback: CallbackQuery):
     if user_id not in users_db:
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
-    char_name = callback.data.split("_")[-1]
+    char_name = callback.data.split("_", 2)[2] 
     user_data = users_db[user_id]
     
     char_data = master_characters[char_name]
@@ -543,9 +600,10 @@ async def process_train_add(callback: CallbackQuery):
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    parts = callback.data.split("_")
-    stat_to_add = parts[2] # e.g., 'speed'
-    char_name = parts[3]   # e.g., 'Bachira'
+    # 🟢 FIX: Use maxsplit=3 -> ['train', 'add', 'speed', 'Wanima_J']
+    parts = callback.data.split("_", 3) 
+    stat_to_add = parts[2] 
+    char_name = parts[3]   
     
     user_data = users_db[user_id]
     char_profile = user_data["roster"][char_name]
@@ -571,7 +629,7 @@ async def process_train_reset(callback: CallbackQuery):
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    char_name = callback.data.split("_")[2]
+    char_name = callback.data.split("_", 2)[2]
     user_data = users_db[user_id]
     char_profile = user_data["roster"][char_name]
     
@@ -688,6 +746,27 @@ def render_match_ui(user_id):
         buttons.append([InlineKeyboardButton(text="🔙 CANCEL PASS", callback_data="match_action_back")])
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    elif match["ui_state"] == "defense":
+        defender = match["active_defender"]
+        carrier = match["ball_carrier"]
+        stamina = match["stamina"][defender]
+        
+        text = (
+            f"{header}"
+            f"🛡️ <b>DEFENSIVE ENGAGEMENT</b>\n"
+            f"🟢 <b>Your Defender:</b> {defender} (Stamina: {stamina}/100)\n"
+            f"🔴 <b>Enemy Carrier:</b> {carrier}\n\n"
+            f"<i>Read the enemy's play. What is {defender} going to do?</i>"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛑 BLOCK DRIBBLE", callback_data="match_defend_dribble"),
+             InlineKeyboardButton(text="🦅 CUT PASS", callback_data="match_defend_pass")],
+            [InlineKeyboardButton(text="🧱 BLOCK SHOOT", callback_data="match_defend_shoot")],
+            [InlineKeyboardButton(text="🔙 BACK TO PITCH", callback_data="match_action_back")]
+        ])
+        return text, kb
+
     elif match["ui_state"] == "action":
         carrier = match["ball_carrier"]
         stamina = match["stamina"][carrier]
@@ -719,14 +798,112 @@ def render_match_ui(user_id):
 
     return header, InlineKeyboardMarkup(inline_keyboard=[])
 
+@router.callback_query(F.data.startswith("match_defend_"))
+async def process_match_defense(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in active_matches:
+        return await callback.answer("Match expired.", show_alert=True)
+        
+    match = active_matches[user_id]
+    user_data = users_db[user_id]
+    
+    player_action = callback.data.split("_")[2] # 'dribble', 'pass', or 'shoot'
+    defender = match["active_defender"]
+    carrier = match["ball_carrier"]
+    
+    # AI Logic: Decide what the AI is going to do
+    ai_choices = ["dribble", "pass"]
+    ai_row = match["positions"][carrier][0]
+    if ai_row >= 3: # If AI is deep in your half, they might shoot
+        ai_choices.append("shoot")
+        
+    ai_action = random.choice(ai_choices)
+    
+    # Get Stats
+    def_data = master_characters[defender]
+    def_prof = user_data["roster"][defender]
+    ai_data = master_characters[carrier]
+    
+    # Calculate Power
+    def_power = def_data["defense"] + def_prof["bonus_stats"]["defense"]
+    ai_power = ai_data[ai_action] # AI just uses base stats for now
+    
+    log_msgs = [f"🤖 AI chose to <b>{ai_action.upper()}</b>!"]
+    
+    # ⚠️ OOP Penalty for Defender
+    assigned_role = next((role for role, char in user_data["active_team"].items() if char == defender), None)
+    if assigned_role and not assigned_role.startswith(def_data["position"]):
+        def_power = int(def_power * 0.70)
+        log_msgs.append(f"⚠️ {defender} is out of position! Defense drops by 30%.")
+        
+    # Fatigue
+    if match["stamina"][defender] < 30:
+        def_power = int(def_power * 0.50)
+        log_msgs.append(f"💦 {defender} is exhausted!")
+        
+    match["stamina"][defender] = max(0, match["stamina"][defender] - 10)
+    
+    # 🧠 PREDICTION MULTIPLIER
+    if player_action == ai_action:
+        def_power = int(def_power * 1.5)
+        log_msgs.append(f"🧠 <b>PERFECT READ!</b> {defender} perfectly predicted the {ai_action}!")
+    else:
+        ai_power = int(ai_power * 1.5)
+        log_msgs.append(f"❌ <b>MISREAD!</b> You moved to stop a {player_action}, leaving {ai_action} wide open!")
+        
+    # --- RESOLVE CLASH ---
+    success = def_power >= ai_power
+    
+    if success:
+        # Player wins the ball back!
+        match["possession"] = "player"
+        match["ball_carrier"] = defender
+        match["ego_gauge"] = min(100, match["ego_gauge"] + 20)
+        match["log"] = "\n".join(log_msgs) + f"\n✅ <b>INTERCEPTION!</b> {defender} crushes {carrier}! ({def_power} vs {ai_power})"
+    else:
+        # AI Wins and advances
+        if ai_action == "shoot":
+            match["ai_score"] += 1
+            match["possession"] = "player"
+            match["ball_carrier"] = match["player_team"][0]
+            match["log"] = "\n".join(log_msgs) + f"\n🥅 <b>GOAL CONCEDED!</b> {carrier} blasts it into your net! ({ai_power} vs {def_power})"
+        elif ai_action == "pass":
+            # AI passes to a random teammate
+            ai_receiver = random.choice([p for p in match["ai_team"] if p != carrier])
+            match["ball_carrier"] = ai_receiver
+            match["log"] = "\n".join(log_msgs) + f"\n❌ <b>DEFENSE BROKEN!</b> {carrier} passes to {ai_receiver}."
+            # AI defensive line pushes down
+            r, c = match["positions"][ai_receiver]
+            if r < 5: match["positions"][ai_receiver] = (r+1, c)
+        elif ai_action == "dribble":
+            match["log"] = "\n".join(log_msgs) + f"\n❌ <b>ANKLES BROKEN!</b> {carrier} blows past {defender}!"
+            r, c = match["positions"][carrier]
+            if r < 5: match["positions"][carrier] = (r+1, c)
+            
+    match["turn"] += 1
+    match["ui_state"] = "overview"
+    
+    if match["ai_score"] >= 2:
+        match["log"] += "\n\n💀 <b>THE WHISTLE BLOWS! YOU WERE DEFEATED!</b>"
+        return await end_match(callback, user_id, win=False)
+
+    text, kb = render_match_ui(user_id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
 @router.callback_query(F.data == "arena_start_ai")
 async def process_arena_start_ai(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_data = users_db[user_id]
     
+    # 🟢 NEW: The Formation Check
+    if "Empty" in user_data["active_team"].values():
+        return await callback.answer(
+            "❌ INCOMPLETE SQUAD!\n\nYou must assign 5 players to your formation before entering the Arena. Go to [⚽ MY TEAM] to set up.", 
+            show_alert=True
+        )
+        
     ai_team = random.sample(list(master_characters.keys()), 5)
-    
-    # 🟢 FIX: Convert the dictionary values into a list so the coordinates can read them!
     player_team_list = list(user_data["active_team"].values())
     
     positions = {
@@ -777,14 +954,22 @@ async def process_match_tap(callback: CallbackQuery):
         
     match = active_matches[user_id]
     tapped_char = callback.data.split("_", 2)[2] 
-    
-    # Transition to State 2 (Action Menu)
+        
+    # Transition to State 2 (Action Menu) - OFFENSE
     if tapped_char == match["ball_carrier"] and match["possession"] == "player":
         match["ui_state"] = "action"
         text, kb = render_match_ui(user_id)
         await callback.message.edit_text(text, reply_markup=kb)
         return await callback.answer()
         
+    # 🟢 NEW: Transition to Defense Menu - DEFENSE
+    elif tapped_char in match["player_team"] and match["possession"] == "ai":
+        match["active_defender"] = tapped_char
+        match["ui_state"] = "defense"
+        text, kb = render_match_ui(user_id)
+        await callback.message.edit_text(text, reply_markup=kb)
+        return await callback.answer()
+
     # Change it to just look for the AI Goalkeeper
     if tapped_char == "AI_GK":
         return await callback.answer(f"{tapped_char}\nRole: Goalkeeper", show_alert=True)
@@ -833,7 +1018,7 @@ async def process_match_execution(callback: CallbackQuery):
     # Determine the exact action being taken
     if callback.data.startswith("match_execute_pass_"):
         action = "pass"
-        target_char = callback.data.split("_")[3]
+        target_char = callback.data.split("_", 3)[3] 
     else:
         action = callback.data.split("_")[2] # 'dribble' or 'shoot'
         target_char = None
@@ -922,9 +1107,9 @@ async def process_match_execution(callback: CallbackQuery):
     
     # Check Win Condition
     if match["player_score"] >= 2:
-        match["log"] = "🏆 <b>THE WHISTLE BLOWS! YOU WIN!</b>"
+        match["log"] += "\n\n🏆 <b>THE WHISTLE BLOWS! YOU WIN!</b>"
         return await end_match(callback, user_id, win=True)
-        
+
     text, kb = render_match_ui(user_id)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
@@ -943,8 +1128,13 @@ async def end_match(callback: CallbackQuery, user_id: int, win: bool):
         user_data["ep"] += 150
         reward_txt = "🏆 <b>VICTORY!</b>\n\nRewards: 💵 +500 Cash, 💎 +150 EP\n📈 <b>Team gained +50 EXP!</b>\n"
         
+
         # --- XP & LEVEL UP LOGIC ---
-        for char_name in user_data["active_team"].values():  # 🟢 FIX: Added .values()
+        for char_name in user_data["active_team"].values():
+            # 🟢 FIX: Safeguard against empty slots crashing the dictionary lookup
+            if char_name == "Empty":
+                continue
+                
             char_profile = user_data["roster"][char_name]
             char_base_data = master_characters[char_name]
             
