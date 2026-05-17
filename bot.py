@@ -848,6 +848,46 @@ def render_match_ui(user_id):
         ])
         return text, kb
 
+    elif match["ui_state"] == "dribble_targeting":
+        text = header + "⚡ <b>DRIBBLE INITIATED</b>\n<i>Select an adjacent empty space to move into.</i>"
+        
+        buttons = []
+        carrier_pos = match["positions"][match["ball_carrier"]]
+        
+        for row in range(8):
+            row_buttons = []
+            for col in range(5):
+                if (row == 0 or row == 7) and col != 2:
+                    row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
+                    continue
+                
+                occupants_here = [char for char, pos in match["positions"].items() if pos == (row, col)]
+                
+                # 🟢 NEW: Calculate if the tile is adjacent (1 step away) and empty
+                is_adjacent = abs(row - carrier_pos[0]) <= 1 and abs(col - carrier_pos[1]) <= 1
+                is_same = (row == carrier_pos[0] and col == carrier_pos[1])
+                
+                if is_adjacent and not is_same and not occupants_here:
+                    row_buttons.append(InlineKeyboardButton(text="✨", callback_data=f"match_execute_dribble_{row}_{col}"))
+                elif occupants_here:
+                    occupant = occupants_here[0]
+                    if match["ball_carrier"] in occupants_here: occupant = match["ball_carrier"] 
+                    
+                    if occupant == match["ball_carrier"]:
+                        row_buttons.append(InlineKeyboardButton(text="⚽ (You)", callback_data="ignore"))
+                    elif occupant == "AI_GK":
+                        row_buttons.append(InlineKeyboardButton(text="🧤", callback_data="ignore"))
+                    elif occupant in match["player_team"]:
+                        row_buttons.append(InlineKeyboardButton(text="🟢", callback_data="ignore"))
+                    else:
+                        row_buttons.append(InlineKeyboardButton(text="🔴", callback_data="ignore"))
+                else:
+                    row_buttons.append(InlineKeyboardButton(text="⬛️", callback_data="ignore"))
+            buttons.append(row_buttons)
+            
+        buttons.append([InlineKeyboardButton(text="🔙 CANCEL DRIBBLE", callback_data="match_action_back")])
+        return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
     elif match["ui_state"] == "action":
         carrier = match["ball_carrier"]
         stamina = match["stamina"][carrier]
@@ -906,16 +946,26 @@ async def process_match_defense(callback: CallbackQuery):
     
     # Calculate Power
     def_power = def_data["defense"] + def_prof["bonus_stats"]["defense"]
-    ai_power = ai_data[ai_action] # AI just uses base stats for now
+    ai_power = ai_data.get(ai_action, 50) # AI just uses base stats for now
     
     log_msgs = [f"🤖 AI chose to <b>{ai_action.upper()}</b>!"]
     
+    # 🟢 1-BOX RANGE RULE
+    def_pos = match["positions"][defender]
+    car_pos = match["positions"][carrier]
+    dist = max(abs(def_pos[0] - car_pos[0]), abs(def_pos[1] - car_pos[1]))
+    
+    # The Goalkeeper is exempt from this rule (they can always guard the net)
+    if defender != user_data["active_team"].get("GK") and dist > 1:
+        def_power = 0
+        log_msgs.append(f"💨 <b>UNCONTESTED:</b> {defender} is too far away to engage! (Must be within 1 tile)")
+        
     # ⚠️ OOP Penalty for Defender
     assigned_role = next((role for role, char in user_data["active_team"].items() if char == defender), None)
     if assigned_role and not assigned_role.startswith(def_data["position"]):
         def_power = int(def_power * 0.70)
         log_msgs.append(f"⚠️ {defender} is out of position! Defense drops by 30%.")
-        
+
     # Fatigue
     if match["stamina"][defender] < 30:
         def_power = int(def_power * 0.50)
@@ -1119,7 +1169,18 @@ async def process_match_action_pass(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-@router.callback_query(F.data.in_(["match_action_dribble", "match_action_shoot"]) | F.data.startswith("match_execute_pass_"))
+@router.callback_query(F.data == "match_action_dribble")
+async def process_match_action_dribble(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in active_matches:
+        return await callback.answer("Match expired.", show_alert=True)
+        
+    active_matches[user_id]["ui_state"] = "dribble_targeting"
+    text, kb = render_match_ui(user_id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query((F.data == "match_action_shoot") | F.data.startswith("match_execute_pass_") | F.data.startswith("match_execute_dribble_"))
 async def process_match_execution(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in active_matches:
@@ -1131,15 +1192,19 @@ async def process_match_execution(callback: CallbackQuery):
     carrier = match["ball_carrier"]
     carrier_pos = match["positions"][carrier]
     
-    # Determine the exact action being taken
+    # 🟢 FIX: Determine the exact action and coordinates
     if callback.data.startswith("match_execute_pass_"):
         action = "pass"
         target_char = callback.data.split("_", 3)[3] 
+    elif callback.data.startswith("match_execute_dribble_"):
+        action = "dribble"
+        parts = callback.data.split("_")
+        target_row = int(parts[3])
+        target_col = int(parts[4])
     else:
-        action = callback.data.split("_")[2] # 'dribble' or 'shoot'
+        action = "shoot"
         target_char = None
         
-    # --- ⚠️ OUT OF POSITION (OOP) CHECK ---
     # Find what slot the manager assigned this player to
     assigned_role = None
     for role, char_name in user_data["active_team"].items():
@@ -1149,45 +1214,58 @@ async def process_match_execution(callback: CallbackQuery):
             
     carrier_data = master_characters[carrier]
     carrier_profile = user_data["roster"][carrier]
-    
-    # Base + Bonus Stats
     active_power = carrier_data[action] + carrier_profile["bonus_stats"][action]
     
     log_msgs = []
     
-    # The OOP Penalty (-30% to all actions)
+    # --- 🟢 DISTANCE PENALTIES & STAT MODIFIERS ---
+    
     if assigned_role and not assigned_role.startswith(carrier_data["position"]):
         active_power = int(active_power * 0.70)
         log_msgs.append(f"⚠️ <b>OOP PENALTY:</b> {carrier} is out of position! Power reduced by 30%.")
         
-    # The Fatigue Penalty (-50% if under 30 Stamina)
+    # LONG RANGE SHOOTING PENALTY
+    if action == "shoot":
+        dist_to_goal = carrier_pos[0] # Goal is at Row 0
+        if dist_to_goal > 2:
+            penalty_pct = (dist_to_goal - 2) * 0.15 # 15% drop per row away
+            active_power = int(active_power * (1.0 - penalty_pct))
+            log_msgs.append(f"🎯 <b>LONG RANGE:</b> Shooting from deep! Power reduced by {int(penalty_pct*100)}%.")
+
     if match["stamina"][carrier] < 30:
         active_power = int(active_power * 0.50)
         log_msgs.append(f"💦 <b>FATIGUE:</b> {carrier} is exhausted! Movement is sluggish.")
         
-    # 🔥 Flow State / Ego Check
     ego_stat = carrier_data["ego"] + carrier_profile["bonus_stats"]["ego"]
     if random.randint(1, 100) <= ego_stat:
         active_power = int(active_power * 1.5)
         log_msgs.append(f"🔥 <b>FLOW STATE!</b> {carrier}'s Ego awakens!")
         
-    # Drain Stamina (Pass is cheap, Dribble/Shoot is heavy)
     match["stamina"][carrier] = max(0, match["stamina"][carrier] - (15 if action != "pass" else 5))
     
-    # --- CLASH RESOLUTION ---
-    # Determine who is defending
+    # --- 🟢 PROXIMITY CLASH RESOLUTION ---
     if action == "shoot":
         ai_defender = "AI_GK"
-        ai_defense = 95 # Base stat for Blue Lock Man
+        ai_defense = 95 
         defense_name = "Blue Lock Man"
     else:
-        # Pick a random AI field player to attempt an interception
-        ai_defender = random.choice(match["ai_team"])
+        # Find the closest AI field player using Chebyshev Distance (1 Box Range including diagonals)
+        def get_dist(p):
+            return max(abs(match["positions"][p][0] - carrier_pos[0]), abs(match["positions"][p][1] - carrier_pos[1]))
+            
+        ai_field = [p for p in match["ai_team"] if p != "AI_GK"]
+        ai_defender = min(ai_field, key=get_dist)
         ai_defense = master_characters[ai_defender]["defense"]
         defense_name = ai_defender
         
+        # 🟢 1-BOX RANGE RULE (Replaces the Late Close-out Penalty)
+        dist = get_dist(ai_defender)
+        if dist > 1:
+            ai_defense = 0 # They are too far away to contest!
+            log_msgs.append(f"💨 <b>UNCONTESTED:</b> {defense_name} is too far away to engage!")
+            
     success = active_power >= ai_defense
-    
+
     if success:
         match["ego_gauge"] = min(100, match["ego_gauge"] + 20)
         if action == "shoot":
@@ -1231,20 +1309,12 @@ async def process_match_execution(callback: CallbackQuery):
                         # 🟢 FIX: Only move if the tile is completely empty!
                         if new_pos not in match["positions"].values():
                             match["positions"][p] = new_pos
-                    
+          
         elif action == "dribble":
             match["log"] = "\n".join(log_msgs) + f"\n✅ <b>BROKE THROUGH!</b> {carrier} destroys {defense_name}! ({active_power} vs {ai_defense})"
             
-            # 🗺️ DYNAMIC MOVEMENT: Move carrier up 1 row
-            r, c = match["positions"][carrier]
-            if r > 1: 
-                target_pos = (r-1, c)
-                # 🟢 FIX: Swap places with whoever is in front of you so you don't overlap!
-                for char, pos in match["positions"].items():
-                    if pos == target_pos:
-                        match["positions"][char] = (r, c)
-                        break
-                match["positions"][carrier] = target_pos
+            # 🗺️ DYNAMIC MOVEMENT: Snap to the specific selected tile!
+            match["positions"][carrier] = (target_row, target_col)
             
     else:
         # Turnover!
