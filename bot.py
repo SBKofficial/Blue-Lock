@@ -23,22 +23,22 @@ router = Router()
 # --- GAME CONSTANTS & HELPERS ---
 RARITY_CAPS = {2: 20, 3: 35, 4: 50, 5: 70}
 
-# 🟢 NEW: The Tactical Playbook
+# 🟢 NEW: The 5x8 Tactical Playbook
 FORMATIONS = {
     "1-2-1": {
         "name": "Balanced (1-2-1)",
         "slots": {"FW": "Striker", "MF_L": "Left Mid", "MF_R": "Right Mid", "DF": "Center Back", "GK": "Goalkeeper"},
-        "coords": {"FW": (3, 1), "MF_L": (3, 0), "MF_R": (3, 2), "DF": (4, 1), "GK": (5, 1)}
+        "coords": {"FW": (4, 2), "MF_L": (5, 1), "MF_R": (5, 3), "DF": (6, 2), "GK": (7, 2)}
     },
     "2-1-1": {
         "name": "Attacking (2-1-1)",
         "slots": {"FW_L": "Left Wing", "FW_R": "Right Wing", "MF": "Center Mid", "DF": "Center Back", "GK": "Goalkeeper"},
-        "coords": {"FW_L": (3, 0), "FW_R": (3, 2), "MF": (3, 1), "DF": (4, 1), "GK": (5, 1)}
+        "coords": {"FW_L": (4, 1), "FW_R": (4, 3), "MF": (5, 2), "DF": (6, 2), "GK": (7, 2)}
     },
     "1-1-2": {
         "name": "Defensive (1-1-2)",
         "slots": {"FW": "Striker", "MF": "Center Mid", "DF_L": "Left Back", "DF_R": "Right Back", "GK": "Goalkeeper"},
-        "coords": {"FW": (3, 1), "MF": (4, 1), "DF_L": (4, 0), "DF_R": (4, 2), "GK": (5, 1)}
+        "coords": {"FW": (4, 2), "MF": (5, 2), "DF_L": (6, 1), "DF_R": (6, 3), "GK": (7, 2)}
     }
 }
 
@@ -745,12 +745,14 @@ def render_match_ui(user_id):
 
     if match["ui_state"] == "overview":
         text = header + f"{match['log']}\n\n<i>Tap your ball carrier (⚽) to make a play, or tap any player to view stats.</i>"
-        
+    
         buttons = []
-        for row in range(6):
+        for row in range(8): # 🟢 8 Rows
             row_buttons = []
-            for col in range(3):
-                if (row == 0 or row == 5) and (col == 0 or col == 2):
+            for col in range(5): # 🟢 5 Columns
+                
+                # 🟢 If it's the top or bottom row, everything is a net EXCEPT the center tile (col 2) where the GK stands
+                if (row == 0 or row == 7) and col != 2:
                     row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
                     continue
                 
@@ -788,10 +790,12 @@ def render_match_ui(user_id):
         text = header + "👁️ <b>PASS INITIATED</b>\n<i>Select a teammate on the pitch to receive the ball.</i>"
         
         buttons = []
-        for row in range(6):
+        for row in range(8): # 🟢 FIX: Upgraded to 8 Rows
             row_buttons = []
-            for col in range(3):
-                if (row == 0 or row == 5) and (col == 0 or col == 2):
+            for col in range(5): # 🟢 FIX: Upgraded to 5 Columns
+                
+                # 🟢 FIX: Updated Goalpost logic to match the 5x8 board
+                if (row == 0 or row == 7) and col != 2:
                     row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
                     continue
                 
@@ -807,7 +811,6 @@ def render_match_ui(user_id):
                     else:
                         occupant = occupants_here[0] 
 
-                    # 🟢 FIX: We restored the target appending logic that was deleted!
                     if occupant in match["player_team"] and occupant != match["ball_carrier"]:
                         btn_text = f"📍 {occupant}"
                         row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_execute_pass_{occupant}"))
@@ -849,13 +852,12 @@ def render_match_ui(user_id):
         carrier = match["ball_carrier"]
         stamina = match["stamina"][carrier]
         
-        # Find carrier's zone based on coordinates for the UI text
         row, col = match["positions"][carrier]
-        zones = {1: "Defensive 3rd", 2: "Defensive Midfield", 3: "Center Midfield", 4: "Attacking 3rd"}
-        lane = {0: "Left Wing", 1: "Center", 2: "Right Wing"}
+        # 🟢 NEW: 8 Rows and 5 Lanes of text descriptions
+        zones = {1: "AI Penalty Box", 2: "Attacking 3rd", 3: "Upper Midfield", 4: "Lower Midfield", 5: "Defensive 3rd", 6: "Own Penalty Box"}
+        lane = {0: "Far Left Wing", 1: "Left Half-Space", 2: "Center", 3: "Right Half-Space", 4: "Far Right Wing"}
         
-        # Row 0 and 5 are penalty areas
-        zone_name = zones.get(row, "Penalty Area") 
+        zone_name = zones.get(row, "Goal Line") 
         current_zone = f"{lane.get(col, 'Center')} ({zone_name})"
         
         text = (
@@ -938,13 +940,31 @@ async def process_match_defense(callback: CallbackQuery):
         match["ball_carrier"] = defender
         match["ego_gauge"] = min(100, match["ego_gauge"] + 20)
         match["log"] = "\n".join(log_msgs) + f"\n✅ <b>INTERCEPTION!</b> {defender} crushes {carrier}! ({def_power} vs {ai_power})"
+
     else:
         # AI Wins and advances
         if ai_action == "shoot":
             match["ai_score"] += 1
-            match["possession"] = "player"
-            match["ball_carrier"] = match["player_team"][0]
             match["log"] = "\n".join(log_msgs) + f"\n🥅 <b>GOAL CONCEDED!</b> {carrier} blasts it into your net! ({ai_power} vs {def_power})"
+            
+            # 🟢 KICKOFF RESET: You get the ball back, everyone resets to formation!
+            match["possession"] = "player"
+            match["ball_carrier"] = match["player_team"][0] # Give ball to your striker
+            
+            form_id = user_data.get("formation", "1-2-1")
+            new_positions = {
+                "AI_GK": (0, 2),
+                match["ai_team"][0]: (3, 2),
+                match["ai_team"][1]: (2, 1),
+                match["ai_team"][2]: (2, 3),
+                match["ai_team"][3]: (1, 2),
+            }
+            # Snap player team back to their chosen formation
+            for role, char_name in user_data["active_team"].items():
+                if char_name: 
+                    new_positions[char_name] = FORMATIONS[form_id]["coords"][role]
+                    
+            match["positions"] = new_positions
 
         elif ai_action == "pass":
             # AI passes to a random teammate
@@ -956,7 +976,7 @@ async def process_match_defense(callback: CallbackQuery):
             if ai_receiver != "AI_GK": 
                 r, c = match["positions"][ai_receiver]
                 # 🟢 FIX 2: Restrict AI field players to row 4!
-                if r < 4: 
+                if r < 6: 
                     new_pos = (r+1, c)
                     if new_pos not in match["positions"].values():
                         match["positions"][ai_receiver] = new_pos
@@ -967,7 +987,7 @@ async def process_match_defense(callback: CallbackQuery):
             if carrier != "AI_GK": 
                 r, c = match["positions"][carrier]
                 # 🟢 FIX 2: Restrict AI to row 4!
-                if r < 4: 
+                if r < 6: 
                     target_pos = (r+1, c)
                     for char, pos in match["positions"].items():
                         if pos == target_pos:
@@ -1003,13 +1023,12 @@ async def process_arena_start_ai(callback: CallbackQuery):
     available_ai_pool = [char for char in master_characters.keys() if char not in player_team_list]
     ai_team = random.sample(available_ai_pool, 4) 
     
-    # AI Default Positions (AI always plays a 1-2-1 Balanced setup)
     positions = {
-        "AI_GK": (0, 1),             
-        ai_team[0]: (1, 1),          
-        ai_team[1]: (1, 0),          
-        ai_team[2]: (1, 2),          
-        ai_team[3]: (2, 1),          
+        "AI_GK": (0, 2),             # AI Goalkeeper (Center of Row 0)
+        ai_team[0]: (3, 2),          # AI Center Forward 
+        ai_team[1]: (2, 1),          # AI Left Mid
+        ai_team[2]: (2, 3),          # AI Right Mid
+        ai_team[3]: (1, 2),          # AI Center Back
     }
     
     # 🟢 NEW: Loop through the player's custom formation and place them on the grid!
@@ -1174,8 +1193,26 @@ async def process_match_execution(callback: CallbackQuery):
         if action == "shoot":
             match["player_score"] += 1
             match["log"] = "\n".join(log_msgs) + f"\n✅ <b>GOAL!</b> {carrier} blasts past {defense_name}! ({active_power} vs {ai_defense})"
-            # Reset ball to midfield for AI kickoff
-            match["ball_carrier"] = match["player_team"][0]
+            
+            # 🟢 KICKOFF RESET: AI gets the ball, everyone resets to formation!
+            match["possession"] = "ai"
+            match["ball_carrier"] = match["ai_team"][0] # Give ball to AI striker
+            
+            form_id = user_data.get("formation", "1-2-1")
+            new_positions = {
+                "AI_GK": (0, 2),
+                match["ai_team"][0]: (3, 2),
+                match["ai_team"][1]: (2, 1),
+                match["ai_team"][2]: (2, 3),
+                match["ai_team"][3]: (1, 2),
+            }
+            # Snap player team back to their chosen formation
+            for role, char_name in user_data["active_team"].items():
+                if char_name: 
+                    new_positions[char_name] = FORMATIONS[form_id]["coords"][role]
+            
+            match["positions"] = new_positions
+
         elif action == "pass":
             match["log"] = "\n".join(log_msgs) + f"\n✅ <b>PASS CONNECTS!</b> {carrier} finds {target_char}! ({active_power} vs {ai_defense})"
             match["ball_carrier"] = target_char
