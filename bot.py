@@ -2,9 +2,10 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from characters import master_characters
 
 # --- CONFIGURATION ---
 # ⚠️ SECURITY WARNING: Put your NEW token here. The old one is likely revoked!
@@ -29,15 +30,16 @@ def get_draft_success_kb():
         [InlineKeyboardButton(text="⚙️ MAIN MENU", callback_data="menu_main")]
     ])
 
+# --- REPLACE THIS IN INLINE KEYBOARDS ---
 def get_main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏟️ ARENA", callback_data="menu_arena"), 
          InlineKeyboardButton(text="📋 ROSTER", callback_data="menu_roster")],
-        [InlineKeyboardButton(text="🏋️ TRAIN", callback_data="menu_train"), 
-         InlineKeyboardButton(text="🚪 SELECTION GATE", callback_data="menu_gacha")],
-        [InlineKeyboardButton(text="⚙️ SETTINGS", callback_data="menu_settings")]
+        [InlineKeyboardButton(text="⚽ MY TEAM", callback_data="menu_team"), # NEW BUTTON
+         InlineKeyboardButton(text="🏋️ TRAIN", callback_data="menu_train")],
+        [InlineKeyboardButton(text="🚪 SELECTION GATE", callback_data="menu_gacha"),
+         InlineKeyboardButton(text="⚙️ SETTINGS", callback_data="menu_settings")]
     ])
-
 
 # --- HANDLERS ---
 
@@ -89,7 +91,8 @@ async def process_draft_team(callback: CallbackQuery):
         "energy": 5,
         "ep": 0,
         "cash": 0,
-        "roster": ["Isagi", "Bachira", "Kunigami", "Chigiri", "Raichi"]
+        "roster": ["Isagi", "Bachira", "Kunigami", "Chigiri", "Raichi"],
+        "active_team": ["Isagi", "Bachira", "Kunigami", "Chigiri", "Raichi"] # NEW LIST
     }
 
     # The dynamic message edit using HTML
@@ -114,6 +117,122 @@ async def process_draft_team(callback: CallbackQuery):
     # Acknowledge the callback to stop the loading icon on the user's button
     await callback.answer()
 
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    
+    if user_id not in users_db:
+        await message.answer("System Error: Manager not found. Please send /start.")
+        return
+    
+    if not command.args:
+        await message.answer("⚠️ <b>Error:</b> Please provide a character name. (Usage: <code>/stats Bachira</code>)")
+        return
+    
+    char_name = command.args.capitalize()
+    user_data = users_db[user_id]
+    
+    if char_name not in master_characters:
+        await message.answer(f"⚠️ <b>Error:</b> {char_name} does not exist in the Blue Lock database.")
+        return
+        
+    if char_name not in user_data.get("roster", []):
+        await message.answer(f"❌ <b>Error:</b> You do not own {char_name}. Head to the Selection Gate to draft them.")
+        return
+        
+    char_data = master_characters[char_name]
+    rarity_stars = "⭐" * char_data['rarity']
+    overall = (char_data['pass'] + char_data['dribble'] + char_data['shoot'] + char_data['defense'] + char_data['speed'] + char_data['ego']) // 6
+    
+    text = (
+        f"{rarity_stars} <b>{char_data['name']}</b>\n"
+        f"🧬 <b>Variant:</b> <i>{char_data['variant']}</i>\n\n"
+        "📊 <b>BASE ATTRIBUTES:</b>\n"
+        f"👟 <b>Speed:</b> {char_data['speed']}\n"
+        f"🎯 <b>Shoot:</b> {char_data['shoot']}\n"
+        f"🧠 <b>Ego:</b> {char_data['ego']}\n"
+        f"👁️ <b>Pass:</b> {char_data['pass']}\n"
+        f"🛡️ <b>Defense:</b> {char_data['defense']}\n"
+        f"⚡ <b>Dribble:</b> {char_data['dribble']}\n\n"
+        f"📈 <b>Overall Rating:</b> {overall}\n"
+    )
+    
+    is_active = char_name in user_data.get("active_team", [])
+    
+    if is_active:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ CURRENTLY IN ACTIVE TEAM", callback_data="none")]
+        ])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ ADD TO ACTIVE TEAM", callback_data=f"swap_init_{char_name}")]
+        ])
+        
+    await message.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data.startswith("swap_init_"))
+async def process_swap_init(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    # Extract the character name we want to swap IN (e.g., "swap_init_Bachira" -> "Bachira")
+    char_to_swap_in = callback.data.split("_")[2]
+    active_team = users_db[user_id].get("active_team", [])
+    
+    text = (
+        "🔄 <b>TEAM SUBSTITUTION</b>\n\n"
+        f"You are moving <b>{char_to_swap_in}</b> to the Active Lineup.\n"
+        "Select a current player to bench:"
+    )
+    
+    # Dynamically generate buttons for the 5 currently active players
+    buttons = []
+    for active_char in active_team:
+        # Callback data format: swap_confirm_IN_OUT (e.g., swap_confirm_Bachira_Raichi)
+        callback_string = f"swap_confirm_{char_to_swap_in}_{active_char}"
+        buttons.append([InlineKeyboardButton(text=f"🔁 Bench {active_char}", callback_data=callback_string)])
+        
+    buttons.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="menu_main")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("swap_confirm_"))
+async def process_swap_confirm(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    # Parse the data: "swap_confirm_Bachira_Raichi"
+    parts = callback.data.split("_")
+    char_in = parts[2]
+    char_out = parts[3]
+    
+    active_team = users_db[user_id]["active_team"]
+    
+    # Execute the swap in the RAM database
+    if char_out in active_team:
+        idx = active_team.index(char_out)
+        active_team[idx] = char_in
+        
+    text = (
+        "✅ <b>SUBSTITUTION COMPLETE!</b>\n\n"
+        f"<b>{char_in}</b> has entered the pitch.\n"
+        f"<i>{char_out} has been benched.</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚽ VIEW ACTIVE TEAM", callback_data="menu_team")],
+        [InlineKeyboardButton(text="⚙️ MAIN MENU", callback_data="menu_main")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
 
 # --- BOT RUNNER ---
 async def main():
