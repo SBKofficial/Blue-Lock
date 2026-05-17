@@ -98,21 +98,26 @@ async def process_draft_team(callback: CallbackQuery):
     if user_id in users_db:
         return await callback.answer("You have already drafted your team!", show_alert=True)
 
-    # Filter for ONLY 2-Star (B-Rank) characters
     b_rank_pool = [name for name, data in master_characters.items() if data['rarity'] == 2]
     starting_team = random.sample(b_rank_pool, 5)
 
-    # Create the new dictionary-based roster
     roster_dict = {char_name: create_char_profile() for char_name in starting_team}
 
     users_db[user_id] = {
         "rank": "Unranked",
         "stratum": "Stratum 5",
         "energy": 5,
-        "ep": 10000,  # Keeping this at 10k for your Gacha testing
+        "ep": 10000,
         "cash": 0,
-        "roster": roster_dict, # Now a dictionary!
-        "active_team": starting_team.copy(), # Keep as a list of names for easy swapping
+        "roster": roster_dict,
+        # 🟢 NEW: The Formation Dictionary
+        "active_team": {
+            "FW": starting_team[0],
+            "MF_L": starting_team[1],
+            "MF_R": starting_team[2],
+            "DF": starting_team[3],
+            "GK": starting_team[4]
+        },
         "in_match": False
     }
 
@@ -129,7 +134,7 @@ async def process_draft_team(callback: CallbackQuery):
     text += (
         "\n📖 <b>MANAGER'S SURVIVAL GUIDE:</b>\n"
         "<b>1. View Stats:</b> Check your [📋 Roster] to see their individual weapons.\n"
-        "<b>2. The Arena:</b> Enter the [🏟️ Arena] to battle other managers for Cash and EP.\n"
+        "<b>2. The Arena:</b> Enter the [🏟️ Arena] to battle other managers.\n"
         "<b>3. Evolve:</b> Use EP at the Selection Gate to pull S-Rank prodigies."
     )
     
@@ -189,7 +194,7 @@ async def cmd_stats(message: Message, command: CommandObject):
         f"🔵 <b>Unspent Points:</b> {char_profile['unspent_points']}\n"
     )
     
-    is_active = char_name in user_data.get("active_team", [])
+    is_active = char_name in user_data.get("active_team", {}).values()
     
     if is_active:
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -201,70 +206,6 @@ async def cmd_stats(message: Message, command: CommandObject):
         ])
         
     await message.answer(text, reply_markup=kb)
-
-@router.callback_query(F.data.startswith("swap_init_"))
-async def process_swap_init(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    if user_id not in users_db:
-        return await callback.answer("Error: Manager not found.", show_alert=True)
-        
-    # Extract the character name we want to swap IN (e.g., "swap_init_Bachira" -> "Bachira")
-    char_to_swap_in = callback.data.split("_")[2]
-    active_team = users_db[user_id].get("active_team", [])
-    
-    text = (
-        "🔄 <b>TEAM SUBSTITUTION</b>\n\n"
-        f"You are moving <b>{char_to_swap_in}</b> to the Active Lineup.\n"
-        "Select a current player to bench:"
-    )
-    
-    # Dynamically generate buttons for the 5 currently active players
-    buttons = []
-    for active_char in active_team:
-        # Callback data format: swap_confirm_IN_OUT (e.g., swap_confirm_Bachira_Raichi)
-        callback_string = f"swap_confirm_{char_to_swap_in}_{active_char}"
-        buttons.append([InlineKeyboardButton(text=f"🔁 Bench {active_char}", callback_data=callback_string)])
-        
-    buttons.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="menu_main")])
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("swap_confirm_"))
-async def process_swap_confirm(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    if user_id not in users_db:
-        return await callback.answer("Error: Manager not found.", show_alert=True)
-        
-    # Parse the data: "swap_confirm_Bachira_Raichi"
-    parts = callback.data.split("_")
-    char_in = parts[2]
-    char_out = parts[3]
-    
-    active_team = users_db[user_id]["active_team"]
-    
-    # Execute the swap in the RAM database
-    if char_out in active_team:
-        idx = active_team.index(char_out)
-        active_team[idx] = char_in
-        
-    text = (
-        "✅ <b>SUBSTITUTION COMPLETE!</b>\n\n"
-        f"<b>{char_in}</b> has entered the pitch.\n"
-        f"<i>{char_out} has been benched.</i>"
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚽ VIEW ACTIVE TEAM", callback_data="menu_team")],
-        [InlineKeyboardButton(text="⚙️ MAIN MENU", callback_data="menu_main")]
-    ])
-    
-    await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
 
 @router.callback_query(F.data == "menu_main")
 async def process_menu_main(callback: CallbackQuery):
@@ -291,35 +232,106 @@ async def process_menu_main(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=get_main_menu_kb())
     await callback.answer()
 
-
 @router.callback_query(F.data == "menu_team")
 async def process_menu_team(callback: CallbackQuery):
     user_id = callback.from_user.id
-    
     if user_id not in users_db:
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
     user_data = users_db[user_id]
-    active_team = user_data.get("active_team", [])
+    active_team = user_data.get("active_team", {})
     
-    text = "⚽ <b>YOUR ACTIVE LINEUP (STARTING 5)</b>\n\n"
+    text = "📋 <b>TACTICAL FORMATION (3-1-1)</b>\n\n"
     total_power = 0
-
-    for char_name in active_team:
-        if char_name in master_characters:
+    
+    roles = [
+        ("FW", "Striker"),
+        ("MF_L", "Left Midfield"),
+        ("MF_R", "Right Midfield"),
+        ("DF", "Center Defense"),
+        ("GK", "Goalkeeper")
+    ]
+    
+    for role_key, role_name in roles:
+        char_name = active_team.get(role_key)
+        if char_name and char_name in master_characters:
             char_data = master_characters[char_name]
+            # Warning if playing out of position!
+            pos_warning = "⚠️" if char_data.get('position') != role_key.split('_')[0] else "✅"
+            
             power = (char_data['pass'] + char_data['dribble'] + char_data['shoot'] + char_data['defense'] + char_data['speed'] + char_data['ego']) // 6
             total_power += power
-            rarity_stars = "⭐" * char_data['rarity']
-            text += f"{rarity_stars} <b>{char_name}</b> (<i>{char_data['variant']}</i>) - OVR: {power}\n"
+            
+            text += f"<b>{role_name}:</b> {pos_warning} {char_name} (OVR: {power})\n"
+            text += f"└ <i>Natural: {char_data.get('position', 'UNK')} | {char_data['variant']}</i>\n\n"
 
-    text += f"\n📊 <b>TOTAL SQUAD RATING: {total_power}</b>\n"
-    text += "<i>This is the team you will take into the Arena.</i>"
+    text += f"📊 <b>TOTAL SQUAD OVR: {total_power}</b>\n"
+    text += "<i>⚠️ Note: Playing out of position will reduce a player's stats in the Arena!</i>"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
     ])
 
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("swap_init_"))
+async def process_swap_init(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    char_to_swap_in = callback.data.split("_")[2]
+    active_team = users_db[user_id].get("active_team", {})
+    
+    text = (
+        "🔄 <b>TACTICAL SUBSTITUTION</b>\n\n"
+        f"Deploying <b>{char_to_swap_in}</b> to the pitch.\n"
+        "Select which position slot they will fill:"
+    )
+    
+    buttons = []
+    # Generate a button for the specific slots instead of the player names
+    roles = {"FW": "Striker", "MF_L": "Left Mid", "MF_R": "Right Mid", "DF": "Defense", "GK": "Goalkeeper"}
+    
+    for slot_key, slot_name in roles.items():
+        current_player = active_team.get(slot_key, "Empty")
+        callback_string = f"swap_confirm_{char_to_swap_in}_{slot_key}"
+        buttons.append([InlineKeyboardButton(text=f"🔁 {slot_name} (Bench {current_player})", callback_data=callback_string)])
+        
+    buttons.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="menu_main")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("swap_confirm_"))
+async def process_swap_confirm(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    parts = callback.data.split("_")
+    char_in = parts[2]
+    slot_key = parts[3] # e.g., 'FW' or 'MF_L'
+    
+    active_team = users_db[user_id]["active_team"]
+    char_out = active_team.get(slot_key)
+    
+    # Execute the swap into the specific role slot
+    active_team[slot_key] = char_in
+        
+    text = (
+        "✅ <b>SUBSTITUTION COMPLETE!</b>\n\n"
+        f"<b>{char_in}</b> has entered the pitch at <b>{slot_key}</b>.\n"
+        f"<i>{char_out} has been benched.</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚽ VIEW ACTIVE TEAM", callback_data="menu_team")],
+        [InlineKeyboardButton(text="⚙️ MAIN MENU", callback_data="menu_main")]
+    ])
+    
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
@@ -479,7 +491,7 @@ async def process_train_select(callback: CallbackQuery):
     if user_id not in users_db:
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
-    char_name = callback.data.split("_")[2]
+    char_name = callback.data.split("_")[-1]
     user_data = users_db[user_id]
     
     char_data = master_characters[char_name]
@@ -617,49 +629,94 @@ def render_match_ui(user_id):
     if match["ui_state"] == "overview":
         text = header + f"{match['log']}\n\n<i>Tap your ball carrier (⚽) to make a play, or tap any player to view stats.</i>"
         
-        # 🟢 GENERATE THE 3x6 PITCH KEYBOARD 🟢
         buttons = []
         for row in range(6):
             row_buttons = []
             for col in range(3):
-                # Handle the Goal Posts (Corners of Row 0 and Row 5)
                 if (row == 0 or row == 5) and (col == 0 or col == 2):
                     row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
                     continue
                 
-                # Check if anyone is standing on this (row, col)
-                occupant = None
-                for char, pos in match["positions"].items():
-                    if pos == (row, col):
-                        occupant = char
-                        break
+                occupant = next((char for char, pos in match["positions"].items() if pos == (row, col)), None)
                 
                 if occupant:
-                    # Determine icon based on team
                     if occupant == "AI_GK":
                         btn_text = "🧤 AI GK"
-                    elif occupant == "Player_GK":
-                        btn_text = "🧤 Your GK"
                     elif occupant in match["player_team"]:
-                        # Add ball icon if they are the carrier
+                        # Your GK gets rendered as a normal green player now!
                         prefix = "⚽ 🟢 " if occupant == match["ball_carrier"] else "🟢 "
                         btn_text = f"{prefix}{occupant}"
                     else:
                         prefix = "⚽ 🔴 " if occupant == match["ball_carrier"] else "🔴 "
                         btn_text = f"{prefix}{occupant}"
                         
-                    # Callback data sends the character name they tapped
                     row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_tap_{occupant}"))
                 else:
-                    # Empty space
                     row_buttons.append(InlineKeyboardButton(text="⬛️", callback_data="ignore"))
-                    
             buttons.append(row_buttons)
             
         buttons.append([InlineKeyboardButton(text="🏳️ FORFEIT MATCH", callback_data="match_forfeit")])
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
         
-    # We will build "action" and "targeting" states in Phase 2
+    elif match["ui_state"] == "targeting":
+        text = header + "👁️ <b>PASS INITIATED</b>\n<i>Select a teammate on the pitch to receive the ball.</i>"
+        
+        buttons = []
+        for row in range(6):
+            row_buttons = []
+            for col in range(3):
+                if (row == 0 or row == 5) and (col == 0 or col == 2):
+                    row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
+                    continue
+                
+                occupant = next((char for char, pos in match["positions"].items() if pos == (row, col)), None)
+                
+                if occupant:
+                    if occupant in match["player_team"] and occupant != match["ball_carrier"]:
+                        btn_text = f"📍 {occupant}"
+                        row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_execute_pass_{occupant}"))
+                    elif occupant == match["ball_carrier"]:
+                        row_buttons.append(InlineKeyboardButton(text="⚽ (You)", callback_data="ignore"))
+                    elif occupant == "AI_GK":
+                        row_buttons.append(InlineKeyboardButton(text="🧤", callback_data="ignore"))
+                    else:
+                        row_buttons.append(InlineKeyboardButton(text="🔴", callback_data="ignore"))
+                else:
+                    row_buttons.append(InlineKeyboardButton(text="⬛️", callback_data="ignore"))
+            buttons.append(row_buttons)
+            
+        buttons.append([InlineKeyboardButton(text="🔙 CANCEL PASS", callback_data="match_action_back")])
+        return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    elif match["ui_state"] == "action":
+        carrier = match["ball_carrier"]
+        stamina = match["stamina"][carrier]
+        
+        # Find carrier's zone based on coordinates for the UI text
+        row, col = match["positions"][carrier]
+        zones = {1: "Defensive 3rd", 2: "Defensive Midfield", 3: "Center Midfield", 4: "Attacking 3rd"}
+        lane = {0: "Left Wing", 1: "Center", 2: "Right Wing"}
+        
+        # Row 0 and 5 are penalty areas
+        zone_name = zones.get(row, "Penalty Area") 
+        current_zone = f"{lane.get(col, 'Center')} ({zone_name})"
+        
+        text = (
+            f"{header}"
+            f"🏃‍♂️ <b>{carrier}</b>\n"
+            f"🔋 <b>Stamina:</b> {stamina}/100\n"
+            f"📍 <b>Location:</b> {current_zone}\n\n"
+            f"<i>What is your move?</i>"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ DRIBBLE", callback_data="match_action_dribble"),
+             InlineKeyboardButton(text="🎯 SHOOT", callback_data="match_action_shoot")],
+            [InlineKeyboardButton(text="👁️ PASS", callback_data="match_action_pass")],
+            [InlineKeyboardButton(text="🔙 BACK TO PITCH", callback_data="match_action_back")]
+        ])
+        return text, kb
+
     return header, InlineKeyboardMarkup(inline_keyboard=[])
 
 @router.callback_query(F.data == "arena_start_ai")
@@ -667,30 +724,25 @@ async def process_arena_start_ai(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_data = users_db[user_id]
     
-    # Randomly select 5 characters for the AI
     ai_team = random.sample(list(master_characters.keys()), 5)
-    player_team = user_data["active_team"]
     
-    # 🗺️ THE COORDINATE SYSTEM (Row, Col)
-    # Rows: 0 to 5 (0 is AI Goal, 5 is Player Goal)
-    # Cols: 0 to 2 (0 is Left, 1 is Center, 2 is Right)
+    # 🟢 FIX: Convert the dictionary values into a list so the coordinates can read them!
+    player_team_list = list(user_data["active_team"].values())
     
     positions = {
-        # AI Goalkeeper (Row 0)
         "AI_GK": (0, 1),
-        # AI Defense/Midfield (Rows 1 & 2)
         ai_team[0]: (1, 1), ai_team[1]: (1, 0), ai_team[2]: (1, 2),
         ai_team[3]: (2, 1), ai_team[4]: (2, 2),
         
-        # Player Midfield/Defense (Rows 3 & 4)
-        player_team[0]: (3, 1), player_team[1]: (3, 0), player_team[2]: (3, 2),
-        player_team[3]: (4, 1), player_team[4]: (4, 2),
-        # Player Goalkeeper (Row 5)
-        "Player_GK": (5, 1)
+        # Player Field & Goalkeeper (Rows 3, 4, & 5)
+        player_team_list[0]: (3, 1), # FW
+        player_team_list[1]: (3, 0), # MF_L
+        player_team_list[2]: (3, 2), # MF_R
+        player_team_list[3]: (4, 1), # DF
+        player_team_list[4]: (5, 1)  # 🟢 FIX: Your actual GK is placed here instead of a fake NPC!
     }
     
-    # Initialize Stamina for all players
-    stamina = {char: 100 for char in player_team + ai_team}
+    stamina = {char: 100 for char in player_team_list + ai_team}
 
     active_matches[user_id] = {
         "status": "active",
@@ -698,18 +750,17 @@ async def process_arena_start_ai(callback: CallbackQuery):
         "ai_score": 0,
         "turn": 1,
         "possession": "player",
-        "ball_carrier": player_team[0], # The player at (3, 1) starts with the ball
-        "player_team": player_team,
+        "ball_carrier": player_team_list[0], 
+        "player_team": player_team_list,
         "ai_team": ai_team,
         "positions": positions,
         "stamina": stamina,
         "ego_gauge": 0,
         "log": "<i>The whistle blows! You have the kickoff.</i>",
-        "ui_state": "overview" # Can be: overview, action, targeting
+        "ui_state": "overview" 
     }
     
     user_data["in_match"] = True
-    
     text, kb = render_match_ui(user_id)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("Match started!", show_alert=True)
@@ -718,28 +769,57 @@ async def process_arena_start_ai(callback: CallbackQuery):
 async def process_ignore(callback: CallbackQuery):
     await callback.answer()
 
-@router.callback_query(F.data == "match_intent_pass")
-async def process_match_intent_pass(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("match_tap_"))
+async def process_match_tap(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in active_matches:
         return await callback.answer("Match expired.", show_alert=True)
         
-    text, kb = render_match_ui(user_id, show_pass_menu=True)
-    await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
+    match = active_matches[user_id]
+    tapped_char = callback.data.split("_", 2)[2] 
+    
+    # Transition to State 2 (Action Menu)
+    if tapped_char == match["ball_carrier"] and match["possession"] == "player":
+        match["ui_state"] = "action"
+        text, kb = render_match_ui(user_id)
+        await callback.message.edit_text(text, reply_markup=kb)
+        return await callback.answer()
+        
+    # Change it to just look for the AI Goalkeeper
+    if tapped_char == "AI_GK":
+        return await callback.answer(f"{tapped_char}\nRole: Goalkeeper", show_alert=True)
+        
+    stamina = match["stamina"].get(tapped_char, 100)
+    team_prefix = "🟢" if tapped_char in match["player_team"] else "🔴"
+    
+    await callback.answer(f"{team_prefix} {tapped_char}\nStamina: {stamina}/100\nClick ball carrier to move.", show_alert=True)
 
-@router.callback_query(F.data == "match_cancel_pass")
-async def process_match_cancel_pass(callback: CallbackQuery):
+@router.callback_query(F.data == "match_action_back")
+async def process_match_action_back(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in active_matches:
         return await callback.answer("Match expired.", show_alert=True)
         
-    text, kb = render_match_ui(user_id, show_pass_menu=False)
+    # Revert state back to the board
+    active_matches[user_id]["ui_state"] = "overview"
+    text, kb = render_match_ui(user_id)
+    
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("match_exec_") | F.data.startswith("match_defend_"))
-async def process_match_turn(callback: CallbackQuery):
+@router.callback_query(F.data == "match_action_pass")
+async def process_match_action_pass(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in active_matches:
+        return await callback.answer("Match expired.", show_alert=True)
+        
+    active_matches[user_id]["ui_state"] = "targeting"
+    text, kb = render_match_ui(user_id)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.in_(["match_action_dribble", "match_action_shoot"]) | F.data.startswith("match_execute_pass_"))
+async def process_match_execution(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in active_matches:
         return await callback.answer("Match expired.", show_alert=True)
@@ -747,125 +827,104 @@ async def process_match_turn(callback: CallbackQuery):
     match = active_matches[user_id]
     user_data = users_db[user_id]
     
-    parts = callback.data.split("_")
-    action_type = parts[2] # 'dribble', 'shoot', 'pass' for attack, OR 'dribble', 'shoot', 'pass' for defense
+    carrier = match["ball_carrier"]
+    carrier_pos = match["positions"][carrier]
     
-    # Check if a specific receiver was targeted during a pass
-    target_receiver = parts[3] if len(parts) > 3 else None 
-    
-    p_char = match["player_active"]
-    p_prof = user_data["roster"][p_char]
-    ai_char = match["ai_active"]
-    
-    # Active Stats
-    p_stats = {
-        "dribble": master_characters[p_char]["dribble"] + p_prof["bonus_stats"]["dribble"],
-        "pass": master_characters[p_char]["pass"] + p_prof["bonus_stats"]["pass"],
-        "shoot": master_characters[p_char]["shoot"] + p_prof["bonus_stats"]["shoot"],
-        "defense": master_characters[p_char]["defense"] + p_prof["bonus_stats"]["defense"],
-        "ego": master_characters[p_char]["ego"] + p_prof["bonus_stats"]["ego"]
-    }
-    ai_stats = master_characters[ai_char] # AI uses base stats for now
-    
-    match["turn"] += 1
-    
-    # --- OFFENSIVE POSSESSION ---
-    if match["possession"] == "player":
-        ai_choices = ["dribble", "pass"] if match["zone"] == "Midfield" else ["shoot", "pass"]
-        ai_action = random.choice(ai_choices)
+    # Determine the exact action being taken
+    if callback.data.startswith("match_execute_pass_"):
+        action = "pass"
+        target_char = callback.data.split("_")[3]
+    else:
+        action = callback.data.split("_")[2] # 'dribble' or 'shoot'
+        target_char = None
         
-        offense_power = p_stats[action_type]
-        defense_power = ai_stats["defense"]
-        
-        clash_log = f"You chose to <b>{action_type.upper()}</b>. AI predicted <b>{ai_action.upper()}</b>.\n"
-        
-        # 1. EGO / FLOW STATE CHECK
-        if random.randint(1, 100) <= p_stats["ego"]:
-            offense_power = int(offense_power * 1.5)
-            clash_log += f"🔥 <b>FLOW STATE!</b> {p_char}'s Ego awakens! (Power: {offense_power})\n"
+    # --- ⚠️ OUT OF POSITION (OOP) CHECK ---
+    # Find what slot the manager assigned this player to
+    assigned_role = None
+    for role, char_name in user_data["active_team"].items():
+        if char_name == carrier:
+            assigned_role = role
+            break
             
-        # 2. TACTICAL PREDICTION BONUS
-        if action_type == ai_action:
-            defense_power = int(defense_power * 1.5)
-            clash_log += f"⚠️ The AI read you perfectly! Their defense spikes to {defense_power}!\n"
-            
-        # 3. RESOLUTION
-        if offense_power >= defense_power:
-            # Player Wins!
-            if action_type == "shoot":
-                match["player_score"] += 1
-                match["possession"] = "ai"
-                match["zone"] = "Midfield"
-                match["log"] = f"✅ {clash_log}⚽ <b>GOAL!</b> {p_char} slams it home! AI takes kickoff."
-            else:
-                if action_type == "pass" and target_receiver:
-                    match["player_active"] = target_receiver
-                    clash_log += f"🎯 {p_char} successfully passes to {target_receiver}!\n"
-                
-                if match["zone"] == "Midfield":
-                    match["zone"] = "Penalty Area"
-                    match["log"] = f"✅ {clash_log}<i>You advanced to the Penalty Area!</i>"
-                else:
-                    match["log"] = f"✅ {clash_log}<i>You keep possession in the danger zone!</i>"
-        else:
-            # Turnover!
-            match["possession"] = "ai"
-            match["zone"] = "Midfield"
-            match["player_active"] = random.choice(match["player_team"])
-            match["ai_active"] = random.choice(match["ai_team"])
-            match["log"] = f"❌ {clash_log}<b>TURNOVER!</b> {ai_char} steals the ball!"
-
-    # --- DEFENSIVE POSSESSION ---
-    else: 
-        ai_choices = ["dribble", "pass"] if match["zone"] == "Midfield" else ["shoot", "pass"]
-        ai_action = random.choice(ai_choices)
+    carrier_data = master_characters[carrier]
+    carrier_profile = user_data["roster"][carrier]
+    
+    # Base + Bonus Stats
+    active_power = carrier_data[action] + carrier_profile["bonus_stats"][action]
+    
+    log_msgs = []
+    
+    # The OOP Penalty (-30% to all actions)
+    if assigned_role and not assigned_role.startswith(carrier_data["position"]):
+        active_power = int(active_power * 0.70)
+        log_msgs.append(f"⚠️ <b>OOP PENALTY:</b> {carrier} is out of position! Power reduced by 30%.")
         
-        offense_power = ai_stats[ai_action]
-        defense_power = p_stats["defense"]
+    # The Fatigue Penalty (-50% if under 30 Stamina)
+    if match["stamina"][carrier] < 30:
+        active_power = int(active_power * 0.50)
+        log_msgs.append(f"💦 <b>FATIGUE:</b> {carrier} is exhausted! Movement is sluggish.")
         
-        clash_log = f"AI chose to <b>{ai_action.upper()}</b>. You tried to block <b>{action_type.upper()}</b>.\n"
+    # 🔥 Flow State / Ego Check
+    ego_stat = carrier_data["ego"] + carrier_profile["bonus_stats"]["ego"]
+    if random.randint(1, 100) <= ego_stat:
+        active_power = int(active_power * 1.5)
+        log_msgs.append(f"🔥 <b>FLOW STATE!</b> {carrier}'s Ego awakens!")
         
-        # 1. AI EGO CHECK (Boss mechanics)
-        if random.randint(1, 100) <= ai_stats["ego"]:
-            offense_power = int(offense_power * 1.5)
-            clash_log += f"💀 <b>AI FLOW STATE!</b> {ai_char} becomes a monster! (Power: {offense_power})\n"
+    # Drain Stamina (Pass is cheap, Dribble/Shoot is heavy)
+    match["stamina"][carrier] = max(0, match["stamina"][carrier] - (15 if action != "pass" else 5))
+    
+    # --- CLASH RESOLUTION ---
+    # Determine who is defending
+    if action == "shoot":
+        ai_defender = "AI_GK"
+        ai_defense = 95 # Base stat for Blue Lock Man
+        defense_name = "Blue Lock Man"
+    else:
+        # Pick a random AI field player to attempt an interception
+        ai_defender = random.choice(match["ai_team"])
+        ai_defense = master_characters[ai_defender]["defense"]
+        defense_name = ai_defender
+        
+    success = active_power >= ai_defense
+    
+    if success:
+        match["ego_gauge"] = min(100, match["ego_gauge"] + 20)
+        if action == "shoot":
+            match["player_score"] += 1
+            match["log"] = "\n".join(log_msgs) + f"\n✅ <b>GOAL!</b> {carrier} blasts past {defense_name}! ({active_power} vs {ai_defense})"
+            # Reset ball to midfield for AI kickoff
+            match["ball_carrier"] = match["player_team"][0]
+        elif action == "pass":
+            match["log"] = "\n".join(log_msgs) + f"\n✅ <b>PASS CONNECTS!</b> {carrier} finds {target_char}! ({active_power} vs {ai_defense})"
+            match["ball_carrier"] = target_char
             
-        # 2. TACTICAL PREDICTION BONUS
-        if action_type == ai_action:
-            defense_power = int(defense_power * 1.5)
-            clash_log += f"🛡️ <b>PERFECT READ!</b> Your defense spikes to {defense_power}!\n"
-            
-        # 3. RESOLUTION
-        if defense_power >= offense_power:
-            # Player Intercepts!
-            match["possession"] = "player"
-            match["zone"] = "Midfield"
-            match["player_active"] = random.choice(match["player_team"])
-            match["ai_active"] = random.choice(match["ai_team"])
-            match["log"] = f"✅ {clash_log}<b>INTERCEPTION!</b> {p_char} takes the ball!"
-        else:
-            # AI Wins!
-            if ai_action == "shoot":
-                match["ai_score"] += 1
-                match["possession"] = "player"
-                match["zone"] = "Midfield"
-                match["log"] = f"❌ {clash_log}🥅 <b>GOAL CONCEDED!</b> {ai_char} scores! You take kickoff."
-            else:
-                if match["zone"] == "Midfield":
-                    match["zone"] = "Penalty Area"
-                    match["log"] = f"❌ {clash_log}<i>The AI advances to your Penalty Area!</i>"
-                else:
-                    match["log"] = f"❌ {clash_log}<i>The AI is applying heavy pressure!</i>"
+            # 🗺️ DYNAMIC MOVEMENT: If passing forward, push the defensive line up!
+            target_row = match["positions"][target_char][0]
+            if target_row < carrier_pos[0]:
+                for p in match["player_team"]:
+                    r, c = match["positions"][p]
+                    if r > 1: match["positions"][p] = (r-1, c)
                     
-    # --- WIN CONDITION (First to 2 Goals) ---
+        elif action == "dribble":
+            match["log"] = "\n".join(log_msgs) + f"\n✅ <b>BROKE THROUGH!</b> {carrier} destroys {defense_name}! ({active_power} vs {ai_defense})"
+            # 🗺️ DYNAMIC MOVEMENT: Move carrier up 1 row
+            r, c = match["positions"][carrier]
+            if r > 1: match["positions"][carrier] = (r-1, c)
+            
+    else:
+        # Turnover!
+        match["log"] = "\n".join(log_msgs) + f"\n❌ <b>TURNOVER!</b> {defense_name} stops {carrier}! ({ai_defense} vs {active_power})"
+        match["possession"] = "ai"
+        match["ball_carrier"] = ai_defender if action != "shoot" else match["ai_team"][0]
+            
+    match["turn"] += 1
+    match["ui_state"] = "overview"
+    
+    # Check Win Condition
     if match["player_score"] >= 2:
-        match["log"] = "🏆 <b>THE WHISTLE BLOWS! YOU WIN THE MATCH!</b>"
+        match["log"] = "🏆 <b>THE WHISTLE BLOWS! YOU WIN!</b>"
         return await end_match(callback, user_id, win=True)
-    elif match["ai_score"] >= 2:
-        match["log"] = "💀 <b>THE WHISTLE BLOWS! YOU WERE DEFEATED.</b>"
-        return await end_match(callback, user_id, win=False)
-
-    # Re-render UI with new state
+        
     text, kb = render_match_ui(user_id)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
@@ -885,7 +944,7 @@ async def end_match(callback: CallbackQuery, user_id: int, win: bool):
         reward_txt = "🏆 <b>VICTORY!</b>\n\nRewards: 💵 +500 Cash, 💎 +150 EP\n📈 <b>Team gained +50 EXP!</b>\n"
         
         # --- XP & LEVEL UP LOGIC ---
-        for char_name in user_data["active_team"]:
+        for char_name in user_data["active_team"].values():  # 🟢 FIX: Added .values()
             char_profile = user_data["roster"][char_name]
             char_base_data = master_characters[char_name]
             
