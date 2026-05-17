@@ -18,6 +18,21 @@ users_db = {}
 # Router setup
 router = Router()
 
+# --- GAME CONSTANTS & HELPERS ---
+RARITY_CAPS = {2: 20, 3: 35, 4: 50, 5: 70}
+
+def create_char_profile():
+    """Generates a fresh stat profile for a newly pulled character."""
+    return {
+        "level": 1,
+        "exp": 0,
+        "unspent_points": 0,
+        "bonus_stats": {
+            "speed": 0, "shoot": 0, "dribble": 0, 
+            "defense": 0, "pass": 0, "ego": 0
+        }
+    }
+
 # --- INLINE KEYBOARDS ---
 def get_new_user_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -80,24 +95,24 @@ async def process_draft_team(callback: CallbackQuery):
     user_id = callback.from_user.id
     
     if user_id in users_db:
-        await callback.answer("You have already drafted your team!", show_alert=True)
-        return
+        return await callback.answer("You have already drafted your team!", show_alert=True)
 
     # Filter for ONLY 2-Star (B-Rank) characters
     b_rank_pool = [name for name, data in master_characters.items() if data['rarity'] == 2]
-    
-    # Randomly select 5 unique characters from the 2-star pool
     starting_team = random.sample(b_rank_pool, 5)
+
+    # Create the new dictionary-based roster
+    roster_dict = {char_name: create_char_profile() for char_name in starting_team}
 
     users_db[user_id] = {
         "rank": "Unranked",
         "stratum": "Stratum 5",
         "energy": 5,
-        "ep": 0,  
+        "ep": 10000,  # Keeping this at 10k for your Gacha testing
         "cash": 0,
-        "roster": starting_team.copy(),
-        "active_team": starting_team.copy(),
-        "in_match": False  # NEW TRACTOR ADDED HERE
+        "roster": roster_dict, # Now a dictionary!
+        "active_team": starting_team.copy(), # Keep as a list of names for easy swapping
+        "in_match": False
     }
 
     text = (
@@ -106,7 +121,6 @@ async def process_draft_team(callback: CallbackQuery):
         "🎁 <b>YOUR STARTING 5:</b>\n"
     )
     
-    # Dynamically generate the text for whoever they pulled
     for char_name in starting_team:
         char_data = master_characters[char_name]
         text += f"⭐ {char_data['name']} (<i>{char_data['variant']}</i>)\n"
@@ -140,25 +154,38 @@ async def cmd_stats(message: Message, command: CommandObject):
         await message.answer(f"⚠️ <b>Error:</b> {char_name} does not exist in the Blue Lock database.")
         return
         
-    if char_name not in user_data.get("roster", []):
+    if char_name not in user_data.get("roster", {}):
         await message.answer(f"❌ <b>Error:</b> You do not own {char_name}. Head to the Selection Gate to draft them.")
         return
         
+    # Grab both the base template AND the player's unique profile
     char_data = master_characters[char_name]
+    char_profile = user_data["roster"][char_name] 
+    
     rarity_stars = "⭐" * char_data['rarity']
-    overall = (char_data['pass'] + char_data['dribble'] + char_data['shoot'] + char_data['defense'] + char_data['speed'] + char_data['ego']) // 6
+    
+    # Calculate Total Stats = Base + Bonus
+    tot_spd = char_data['speed'] + char_profile['bonus_stats']['speed']
+    tot_sht = char_data['shoot'] + char_profile['bonus_stats']['shoot']
+    tot_ego = char_data['ego'] + char_profile['bonus_stats']['ego']
+    tot_pas = char_data['pass'] + char_profile['bonus_stats']['pass']
+    tot_def = char_data['defense'] + char_profile['bonus_stats']['defense']
+    tot_dri = char_data['dribble'] + char_profile['bonus_stats']['dribble']
+    
+    overall = (tot_spd + tot_sht + tot_ego + tot_pas + tot_def + tot_dri) // 6
     
     text = (
-        f"{rarity_stars} <b>{char_data['name']}</b>\n"
+        f"{rarity_stars} <b>{char_data['name']}</b> (Lv.{char_profile['level']})\n"
         f"🧬 <b>Variant:</b> <i>{char_data['variant']}</i>\n\n"
-        "📊 <b>BASE ATTRIBUTES:</b>\n"
-        f"👟 <b>Speed:</b> {char_data['speed']}\n"
-        f"🎯 <b>Shoot:</b> {char_data['shoot']}\n"
-        f"🧠 <b>Ego:</b> {char_data['ego']}\n"
-        f"👁️ <b>Pass:</b> {char_data['pass']}\n"
-        f"🛡️ <b>Defense:</b> {char_data['defense']}\n"
-        f"⚡ <b>Dribble:</b> {char_data['dribble']}\n\n"
+        "📊 <b>CURRENT ATTRIBUTES (Base + Bonus):</b>\n"
+        f"👟 <b>Speed:</b> {tot_spd}\n"
+        f"🎯 <b>Shoot:</b> {tot_sht}\n"
+        f"🧠 <b>Ego:</b> {tot_ego}\n"
+        f"👁️ <b>Pass:</b> {tot_pas}\n"
+        f"🛡️ <b>Defense:</b> {tot_def}\n"
+        f"⚡ <b>Dribble:</b> {tot_dri}\n\n"
         f"📈 <b>Overall Rating:</b> {overall}\n"
+        f"🔵 <b>Unspent Points:</b> {char_profile['unspent_points']}\n"
     )
     
     is_active = char_name in user_data.get("active_team", [])
@@ -295,7 +322,6 @@ async def process_menu_team(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-
 @router.callback_query(F.data == "menu_roster")
 async def process_menu_roster(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -304,15 +330,16 @@ async def process_menu_roster(callback: CallbackQuery):
         return await callback.answer("System Error: Manager not found.", show_alert=True)
 
     user_data = users_db[user_id]
-    roster = user_data.get("roster", [])
+    roster_dict = user_data.get("roster", {})
     
-    text = f"📋 <b>YOUR FULL ROSTER (Owned: {len(roster)})</b>\n\n"
+    text = f"📋 <b>YOUR FULL ROSTER (Owned: {len(roster_dict)})</b>\n\n"
     
-    # Simple list of all owned characters
-    for char_name in roster:
+    # Iterate through the keys (character names) in the new dictionary
+    for char_name, char_profile in roster_dict.items():
         if char_name in master_characters:
             rarity_stars = "⭐" * master_characters[char_name]['rarity']
-            text += f"{rarity_stars} <b>{char_name}</b>\n"
+            # We can now show their actual level!
+            text += f"{rarity_stars} <b>{char_name}</b> (Lv.{char_profile['level']})\n"
 
     text += "\n<i>Use <code>/stats [Name]</code> to view their details or swap them into your active team.</i>"
 
@@ -352,7 +379,6 @@ async def process_menu_gacha(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-
 @router.callback_query(F.data == "gacha_pull")
 async def process_gacha_pull(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -362,42 +388,41 @@ async def process_gacha_pull(callback: CallbackQuery):
         
     user_data = users_db[user_id]
     
-    # 1. Check if they have enough EP
     if user_data["ep"] < 100:
         return await callback.answer("❌ Not enough Ego Points (EP)! Win Arena matches to earn more.", show_alert=True)
         
-    # 2. Deduct EP
     user_data["ep"] -= 100
     
-    # 3. Roll for Rarity (1 to 100)
     roll = random.randint(1, 100)
-    if roll <= 2:
-        target_rarity = 5 # 2% EX-Rank
-    elif roll <= 10:
-        target_rarity = 4 # 8% S-Rank
-    elif roll <= 40:
-        target_rarity = 3 # 30% A-Rank
-    else:
-        target_rarity = 2 # 60% B-Rank
+    if roll <= 2: target_rarity = 5
+    elif roll <= 10: target_rarity = 4
+    elif roll <= 40: target_rarity = 3
+    else: target_rarity = 2
         
-    # 4. Filter characters by the rolled rarity
     pool = [name for name, data in master_characters.items() if data['rarity'] == target_rarity]
-    
-    # 5. Select the character
     pulled_char = random.choice(pool)
     char_data = master_characters[pulled_char]
     rarity_stars = "⭐" * char_data['rarity']
     
-    # 6. Check for duplicates ("Devour" mechanic placeholder)
+    # --- DEVOUR LOGIC ---
     if pulled_char in user_data["roster"]:
-        # If they already own them, give them compensation cash for now
-        user_data["cash"] += 500
-        dupe_text = f"\n\n⚠️ <i>You already own this Egoist! They were devoured and converted into 💵 500 Cash.</i>"
+        current_level = user_data["roster"][pulled_char]["level"]
+        max_level = RARITY_CAPS[char_data['rarity']]
+        
+        if current_level < max_level:
+            # Level Up!
+            user_data["roster"][pulled_char]["level"] += 1
+            user_data["roster"][pulled_char]["unspent_points"] += 3
+            dupe_text = f"\n\n🔥 <i>DEVOUR SUCCESSFUL! {pulled_char} reached Lv.{current_level + 1}! (+3 Stat Points)</i>"
+        else:
+            # Max Level Hit
+            user_data["cash"] += 2500
+            dupe_text = f"\n\n⚠️ <i>{pulled_char} is at MAX LEVEL! Converted to 💵 2,500 Cash.</i>"
     else:
-        user_data["roster"].append(pulled_char)
+        # First time pulling this character
+        user_data["roster"][pulled_char] = create_char_profile()
         dupe_text = f"\n\n✅ <i>Added to your [📋 Roster]. Use /stats {pulled_char} to view their weapons.</i>"
         
-    # 7. Build the visual output
     text = (
         "🟦🔥 <b>SELECTION GATE OPENED!</b> 🔥🟦\n\n"
         f"You pulled a {rarity_stars} player!\n\n"
@@ -415,6 +440,147 @@ async def process_gacha_pull(callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
+
+@router.callback_query(F.data == "menu_train")
+async def process_menu_train(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    user_data = users_db[user_id]
+    active_team = user_data.get("active_team", [])
+    
+    text = (
+        "🏋️ <b>BLUE LOCK PHYSICAL TRAINING CENTER</b>\n\n"
+        "<i>Break your limits. Who are we pushing to the brink today?</i>\n\n"
+        f"💵 <b>Available Cash:</b> {user_data['cash']}\n\n"
+        "Select a player from your Active Team to allocate stats:"
+    )
+    
+    # Generate a button for each active player
+    buttons = []
+    for char_name in active_team:
+        unspent = user_data["roster"][char_name]["unspent_points"]
+        btn_text = f"⭐ {char_name} ({unspent} Pts)"
+        # callback format: train_select_Bachira
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"train_select_{char_name}")])
+        
+    buttons.append([InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("train_select_"))
+async def process_train_select(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    char_name = callback.data.split("_")[2]
+    user_data = users_db[user_id]
+    
+    char_data = master_characters[char_name]
+    char_profile = user_data["roster"][char_name]
+    
+    unspent = char_profile["unspent_points"]
+    cash = user_data["cash"]
+    
+    # Calculate Total Stats (Base + Bonus) to show what they are working with
+    tot_spd = char_data['speed'] + char_profile['bonus_stats']['speed']
+    tot_sht = char_data['shoot'] + char_profile['bonus_stats']['shoot']
+    tot_ego = char_data['ego'] + char_profile['bonus_stats']['ego']
+    tot_pas = char_data['pass'] + char_profile['bonus_stats']['pass']
+    tot_def = char_data['defense'] + char_profile['bonus_stats']['defense']
+    tot_dri = char_data['dribble'] + char_profile['bonus_stats']['dribble']
+    
+    text = (
+        f"🏋️ <b>TRAINING: {char_name.upper()} (Lv.{char_profile['level']})</b>\n\n"
+        f"💵 <b>Available Cash:</b> {cash}\n"
+        f"🔵 <b>Unspent Points:</b> {unspent}\n\n"
+        "<i>Applying 1 Stat Point costs 💵 100 Cash.</i>\n\n"
+        f"👟 <b>Speed:</b> {tot_spd} <i>(+{char_profile['bonus_stats']['speed']})</i>\n"
+        f"🎯 <b>Shoot:</b> {tot_sht} <i>(+{char_profile['bonus_stats']['shoot']})</i>\n"
+        f"🧠 <b>Ego:</b> {tot_ego} <i>(+{char_profile['bonus_stats']['ego']})</i>\n"
+        f"👁️ <b>Pass:</b> {tot_pas} <i>(+{char_profile['bonus_stats']['pass']})</i>\n"
+        f"🛡️ <b>Defense:</b> {tot_def} <i>(+{char_profile['bonus_stats']['defense']})</i>\n"
+        f"⚡ <b>Dribble:</b> {tot_dri} <i>(+{char_profile['bonus_stats']['dribble']})</i>\n"
+    )
+    
+    # Generate the stat addition buttons
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ SPEED", callback_data=f"train_add_speed_{char_name}"),
+         InlineKeyboardButton(text="➕ SHOOT", callback_data=f"train_add_shoot_{char_name}")],
+        [InlineKeyboardButton(text="➕ EGO", callback_data=f"train_add_ego_{char_name}"),
+         InlineKeyboardButton(text="➕ PASS", callback_data=f"train_add_pass_{char_name}")],
+        [InlineKeyboardButton(text="➕ DEFENSE", callback_data=f"train_add_defense_{char_name}"),
+         InlineKeyboardButton(text="➕ DRIBBLE", callback_data=f"train_add_dribble_{char_name}")],
+        [InlineKeyboardButton(text="🔄 RESET BUILD (500 Cash)", callback_data=f"train_reset_{char_name}")],
+        [InlineKeyboardButton(text="🔙 BACK TO FACILITY", callback_data="menu_train")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("train_add_"))
+async def process_train_add(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    parts = callback.data.split("_")
+    stat_to_add = parts[2] # e.g., 'speed'
+    char_name = parts[3]   # e.g., 'Bachira'
+    
+    user_data = users_db[user_id]
+    char_profile = user_data["roster"][char_name]
+    
+    # Validation Checks
+    if char_profile["unspent_points"] < 1:
+        return await callback.answer("❌ No unspent points available!", show_alert=True)
+    if user_data["cash"] < 100:
+        return await callback.answer("❌ You need 100 Cash to apply a point!", show_alert=True)
+        
+    # Apply the upgrade
+    user_data["cash"] -= 100
+    char_profile["unspent_points"] -= 1
+    char_profile["bonus_stats"][stat_to_add] += 1
+    
+    # We cheat a little bit here: We just re-call the exact same screen to refresh the UI!
+    await process_train_select(callback)
+
+
+@router.callback_query(F.data.startswith("train_reset_"))
+async def process_train_reset(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users_db:
+        return await callback.answer("Error: Manager not found.", show_alert=True)
+        
+    char_name = callback.data.split("_")[2]
+    user_data = users_db[user_id]
+    char_profile = user_data["roster"][char_name]
+    
+    # Calculate how many points they actually spent so we can refund them
+    total_spent = sum(char_profile["bonus_stats"].values())
+    
+    if total_spent == 0:
+        return await callback.answer("⚠️ No points have been spent on this character yet.", show_alert=True)
+        
+    if user_data["cash"] < 500:
+        return await callback.answer("❌ You need 500 Cash to reset a build!", show_alert=True)
+        
+    # Execute the reset
+    user_data["cash"] -= 500
+    char_profile["unspent_points"] += total_spent
+    
+    # Zero out all bonus stats
+    for stat in char_profile["bonus_stats"]:
+        char_profile["bonus_stats"][stat] = 0
+        
+    await callback.answer("🔄 Build successfully reset!", show_alert=True)
+    await process_train_select(callback)
 
 async def on_startup(bot: Bot):
     print("⚙️ Running Facility Maintenance (Startup Hook)...")
