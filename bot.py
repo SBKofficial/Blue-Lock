@@ -23,6 +23,25 @@ router = Router()
 # --- GAME CONSTANTS & HELPERS ---
 RARITY_CAPS = {2: 20, 3: 35, 4: 50, 5: 70}
 
+# 🟢 NEW: The Tactical Playbook
+FORMATIONS = {
+    "1-2-1": {
+        "name": "Balanced (1-2-1)",
+        "slots": {"FW": "Striker", "MF_L": "Left Mid", "MF_R": "Right Mid", "DF": "Center Back", "GK": "Goalkeeper"},
+        "coords": {"FW": (3, 1), "MF_L": (3, 0), "MF_R": (3, 2), "DF": (4, 1), "GK": (5, 1)}
+    },
+    "2-1-1": {
+        "name": "Attacking (2-1-1)",
+        "slots": {"FW_L": "Left Wing", "FW_R": "Right Wing", "MF": "Center Mid", "DF": "Center Back", "GK": "Goalkeeper"},
+        "coords": {"FW_L": (3, 0), "FW_R": (3, 2), "MF": (3, 1), "DF": (4, 1), "GK": (5, 1)}
+    },
+    "1-1-2": {
+        "name": "Defensive (1-1-2)",
+        "slots": {"FW": "Striker", "MF": "Center Mid", "DF_L": "Left Back", "DF_R": "Right Back", "GK": "Goalkeeper"},
+        "coords": {"FW": (3, 1), "MF": (4, 1), "DF_L": (4, 0), "DF_R": (4, 2), "GK": (5, 1)}
+    }
+}
+
 def create_char_profile():
     """Generates a fresh stat profile for a newly pulled character."""
     return {
@@ -111,8 +130,7 @@ async def process_draft_team(callback: CallbackQuery):
         "ep": 10000,
         "cash": 0,
         "roster": roster_dict,
-        
-        # 🟢 NEW: Start with a completely empty pitch!
+        "formation": "1-2-1", # 🟢 NEW: Default Formation
         "active_team": {
             "FW": None,
             "MF_L": None,
@@ -281,22 +299,16 @@ async def process_menu_team(callback: CallbackQuery):
 
     user_data = users_db[user_id]
     active_team = user_data.get("active_team", {})
+    form_id = user_data.get("formation", "1-2-1")
+    form_data = FORMATIONS[form_id]
     
-    text = "📋 <b>TACTICAL FORMATION (3-1-1)</b>\n\n"
+    text = f"📋 <b>TACTICAL FORMATION: {form_data['name']}</b>\n\n"
     total_power = 0
     
-    roles = [
-        ("FW", "Striker"),
-        ("MF_L", "Left Midfield"),
-        ("MF_R", "Right Midfield"),
-        ("DF", "Center Defense"),
-        ("GK", "Goalkeeper")
-    ]
-    
-    for role_key, role_name in roles:
+    # 🟢 Dynamically load the roles for this specific formation
+    for role_key, role_name in form_data["slots"].items():
         char_name = active_team.get(role_key)
         
-        # 🟢 FIX: Show the empty slots correctly!
         if char_name and char_name in master_characters:
             char_data = master_characters[char_name]
             pos_warning = "⚠️" if char_data.get('position') != role_key.split('_')[0] else "✅"
@@ -310,14 +322,49 @@ async def process_menu_team(callback: CallbackQuery):
             text += f"<b>{role_name}:</b> ⚠️ EMPTY\n└ <i>Assign a player to this slot!</i>\n\n"
 
     text += f"📊 <b>TOTAL SQUAD OVR: {total_power}</b>\n"
-    text += "<i>⚠️ Note: Playing out of position will reduce a player's stats in the Arena!</i>"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗺️ CHANGE FORMATION", callback_data="menu_formations")],
         [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
     ])
 
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
+
+@router.callback_query(F.data == "menu_formations")
+async def process_menu_formations(callback: CallbackQuery):
+    text = (
+        "🗺️ <b>TACTICAL BOARD</b>\n\n"
+        "Select a new tactical layout. \n"
+        "⚠️ <i>WARNING: Changing your formation will bench your entire active team. You will need to re-assign your players!</i>"
+    )
+    
+    buttons = []
+    for form_id, form_data in FORMATIONS.items():
+        buttons.append([InlineKeyboardButton(text=f"📋 {form_data['name']}", callback_data=f"setform:{form_id}")])
+        
+    buttons.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="menu_team")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("setform:"))
+async def process_set_formation(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    form_id = callback.data.split(":")[1]
+    
+    user_data = users_db[user_id]
+    user_data["formation"] = form_id
+    
+    # 🟢 Wipe the active team clean and build the new empty slots
+    new_team = {}
+    for role_key in FORMATIONS[form_id]["slots"].keys():
+        new_team[role_key] = None
+        
+    user_data["active_team"] = new_team
+    
+    await callback.answer(f"✅ Formation updated to {FORMATIONS[form_id]['name']}!", show_alert=True)
+    await process_menu_team(callback) # Return to the team menu to see the empty slots
 
 @router.callback_query(F.data.startswith("swap_init_"))
 async def process_swap_init(callback: CallbackQuery):
@@ -337,8 +384,8 @@ async def process_swap_init(callback: CallbackQuery):
     )
     
     buttons = []
-    # Generate a button for the specific slots instead of the player names
-    roles = {"FW": "Striker", "MF_L": "Left Mid", "MF_R": "Right Mid", "DF": "Defense", "GK": "Goalkeeper"}
+    form_id = users_db[user_id].get("formation", "1-2-1")
+    roles = FORMATIONS[form_id]["slots"]
     
     for slot_key, slot_name in roles.items():
         current_player = active_team.get(slot_key) or "Empty"
@@ -951,24 +998,24 @@ async def process_arena_start_ai(callback: CallbackQuery):
         )
         
     player_team_list = list(user_data["active_team"].values())
+    form_id = user_data.get("formation", "1-2-1")
     
-    # 🟢 FIX 1: Remove your active players from the AI's draft pool!
     available_ai_pool = [char for char in master_characters.keys() if char not in player_team_list]
-    ai_team = random.sample(available_ai_pool, 5)
+    ai_team = random.sample(available_ai_pool, 4) 
     
+    # AI Default Positions (AI always plays a 1-2-1 Balanced setup)
     positions = {
-        "AI_GK": (0, 1),
-        ai_team[0]: (1, 1), ai_team[1]: (1, 0), ai_team[2]: (1, 2),
-        ai_team[3]: (2, 1), ai_team[4]: (2, 2),
-        
-        # Player Field & Goalkeeper (Rows 3, 4, & 5)
-        player_team_list[0]: (3, 1), # FW
-        player_team_list[1]: (3, 0), # MF_L
-        player_team_list[2]: (3, 2), # MF_R
-        player_team_list[3]: (4, 1), # DF
-        player_team_list[4]: (5, 1)  # 🟢 FIX: Your actual GK is placed here instead of a fake NPC!
+        "AI_GK": (0, 1),             
+        ai_team[0]: (1, 1),          
+        ai_team[1]: (1, 0),          
+        ai_team[2]: (1, 2),          
+        ai_team[3]: (2, 1),          
     }
     
+    # 🟢 NEW: Loop through the player's custom formation and place them on the grid!
+    for role, char_name in user_data["active_team"].items():
+        positions[char_name] = FORMATIONS[form_id]["coords"][role]
+
     stamina = {char: 100 for char in player_team_list + ai_team}
 
     active_matches[user_id] = {
