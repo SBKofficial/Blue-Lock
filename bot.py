@@ -93,10 +93,11 @@ async def process_draft_team(callback: CallbackQuery):
         "rank": "Unranked",
         "stratum": "Stratum 5",
         "energy": 5,
-        "ep": 10000,  # We will give them 0 to start
+        "ep": 0,  
         "cash": 0,
         "roster": starting_team.copy(),
-        "active_team": starting_team.copy()
+        "active_team": starting_team.copy(),
+        "in_match": False  # NEW TRACTOR ADDED HERE
     }
 
     text = (
@@ -415,32 +416,64 @@ async def process_gacha_pull(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-async def setup_bot_commands(bot: Bot):
+async def on_startup(bot: Bot):
+    print("⚙️ Running Facility Maintenance (Startup Hook)...")
+    
+    # 1. Auto-load the commands into Telegram's menu
     commands = [
         BotCommand(command="start", description="Access the Blue Lock facility"),
         BotCommand(command="stats", description="View player stats (e.g., /stats Bachira)")
     ]
     await bot.set_my_commands(commands)
-    print("✅ Bot commands successfully uploaded to Telegram.")
+    print("✅ Bot commands successfully uploaded.")
+    
+    # 2. Match State Reset & Compensation Logic
+    compensated_count = 0
+    for user_id, user_data in users_db.items():
+        if user_data.get("in_match") == True:
+            # Reset their state
+            user_data["in_match"] = False
+            
+            # Award compensation
+            user_data["cash"] += 150
+            user_data["ep"] += 15
+            
+            # Send them a direct notification
+            try:
+                text = (
+                    "🛠️ <b>FACILITY MAINTENANCE COMPLETE</b>\n\n"
+                    "The Blue Lock system underwent an unexpected reboot while you were in a match. "
+                    "Your match has been safely terminated to prevent data corruption.\n\n"
+                    "🎁 <b>Compensation Received:</b> +150 Cash, +15 EP\n\n"
+                    "<i>Return to the pitch when you are ready.</i>"
+                )
+                # We use bot.send_message because there is no 'message' or 'callback' to reply to here
+                await bot.send_message(chat_id=user_id, text=text)
+                compensated_count += 1
+            except Exception as e:
+                print(f"⚠️ Failed to send compensation to {user_id}: {e}")
+                
+    print(f"✅ Maintenance complete. Compensated {compensated_count} trapped managers.")
 
 # --- BOT RUNNER ---
 async def main():
-    # Setup logging to see errors in Termux
     logging.basicConfig(level=logging.INFO)
     
-    # Set default parse mode to HTML globally for the bot
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     
+    # Register the startup hook here BEFORE polling starts
+    dp.startup.register(on_startup)
+    
     print("⚽ Blue Lock Bot is starting...")
     
-    # Auto-load the commands into Telegram's menu
-    await setup_bot_commands(bot)
-    
-    # Drop pending updates so it doesn't spam old messages when you restart the script
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Start polling
     await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBot stopped by Manager.")
 
