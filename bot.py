@@ -184,8 +184,10 @@ async def display_stats_ui(message: Message, user_id: int, char_name: str):
     
     if is_active:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ CURRENTLY IN ACTIVE TEAM", callback_data="none")]
+            # 🟢 FIX: Changed "none" to "ignore"
+            [InlineKeyboardButton(text="✅ CURRENTLY IN ACTIVE TEAM", callback_data="ignore")]
         ])
+
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ ADD TO ACTIVE TEAM", callback_data=f"swap_init_{char_name}")]
@@ -323,9 +325,11 @@ async def process_swap_init(callback: CallbackQuery):
     if user_id not in users_db:
         return await callback.answer("Error: Manager not found.", show_alert=True)
         
-    char_to_swap_in = callback.data.split("_")[2]
-    active_team = users_db[user_id].get("active_team", {})
+    # 🟢 FIX: Added maxsplit=2 so it doesn't shatter names like Wanima_J
+    char_to_swap_in = callback.data.split("_", 2)[2]
     
+    active_team = users_db[user_id].get("active_team", {})
+   
     text = (
         "🔄 <b>TACTICAL SUBSTITUTION</b>\n\n"
         f"Deploying <b>{char_to_swap_in}</b> to the pitch.\n"
@@ -665,12 +669,18 @@ async def process_menu_arena(callback: CallbackQuery):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤖 AI PRACTICE (SOLO)", callback_data="arena_start_ai")],
-        [InlineKeyboardButton(text="👥 RANKED MATCH (COMING SOON)", callback_data="none")],
+        # 🟢 FIX: Changed "none" to "ignore"
+        [InlineKeyboardButton(text="👥 RANKED MATCH (COMING SOON)", callback_data="ignore")],
         [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
     ])
     
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
+
+@router.callback_query(F.data == "menu_settings")
+async def process_menu_settings(callback: CallbackQuery):
+    # 🟢 FIX: Added a placeholder handler for the Settings menu
+    await callback.answer("⚙️ Settings Room is currently under construction by Ego.", show_alert=True)
 
 def render_match_ui(user_id):
     match = active_matches[user_id]
@@ -693,19 +703,28 @@ def render_match_ui(user_id):
                     row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
                     continue
                 
-                occupant = next((char for char, pos in match["positions"].items() if pos == (row, col)), None)
+                # 🟢 Priority Logic
+                occupants_here = [char for char, pos in match["positions"].items() if pos == (row, col)]
+                occupant = None
                 
-                if occupant:
+                if occupants_here:
+                    if match["ball_carrier"] in occupants_here:
+                        occupant = match["ball_carrier"] 
+                    elif match.get("ui_state") == "defense" and match.get("active_defender") in occupants_here:
+                        occupant = match["active_defender"] 
+                    else:
+                        occupant = occupants_here[0] 
+
+                    # 🟢 FIX: We restored the color and prefix logic that was deleted!
                     if occupant == "AI_GK":
                         btn_text = "🧤 AI GK"
                     elif occupant in match["player_team"]:
-                        # Your GK gets rendered as a normal green player now!
                         prefix = "⚽ 🟢 " if occupant == match["ball_carrier"] else "🟢 "
                         btn_text = f"{prefix}{occupant}"
                     else:
                         prefix = "⚽ 🔴 " if occupant == match["ball_carrier"] else "🔴 "
                         btn_text = f"{prefix}{occupant}"
-                        
+
                     row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_tap_{occupant}"))
                 else:
                     row_buttons.append(InlineKeyboardButton(text="⬛️", callback_data="ignore"))
@@ -725,9 +744,19 @@ def render_match_ui(user_id):
                     row_buttons.append(InlineKeyboardButton(text="🥅", callback_data="ignore"))
                     continue
                 
-                occupant = next((char for char, pos in match["positions"].items() if pos == (row, col)), None)
+                # 🟢 Priority Logic
+                occupants_here = [char for char, pos in match["positions"].items() if pos == (row, col)]
+                occupant = None
                 
-                if occupant:
+                if occupants_here:
+                    if match["ball_carrier"] in occupants_here:
+                        occupant = match["ball_carrier"] 
+                    elif match.get("ui_state") == "defense" and match.get("active_defender") in occupants_here:
+                        occupant = match["active_defender"] 
+                    else:
+                        occupant = occupants_here[0] 
+
+                    # 🟢 FIX: We restored the target appending logic that was deleted!
                     if occupant in match["player_team"] and occupant != match["ball_carrier"]:
                         btn_text = f"📍 {occupant}"
                         row_buttons.append(InlineKeyboardButton(text=btn_text, callback_data=f"match_execute_pass_{occupant}"))
@@ -870,13 +899,29 @@ async def process_match_defense(callback: CallbackQuery):
             ai_receiver = random.choice([p for p in match["ai_team"] if p != carrier])
             match["ball_carrier"] = ai_receiver
             match["log"] = "\n".join(log_msgs) + f"\n❌ <b>DEFENSE BROKEN!</b> {carrier} passes to {ai_receiver}."
+            
             # AI defensive line pushes down
-            r, c = match["positions"][ai_receiver]
-            if r < 5: match["positions"][ai_receiver] = (r+1, c)
+            if ai_receiver != "AI_GK": # 🟢 FIX: AI GK never moves!
+                r, c = match["positions"][ai_receiver]
+                if r < 5: 
+                    new_pos = (r+1, c)
+                    # 🟢 FIX: Only move if empty
+                    if new_pos not in match["positions"].values():
+                        match["positions"][ai_receiver] = new_pos
+                        
         elif ai_action == "dribble":
             match["log"] = "\n".join(log_msgs) + f"\n❌ <b>ANKLES BROKEN!</b> {carrier} blows past {defender}!"
-            r, c = match["positions"][carrier]
-            if r < 5: match["positions"][carrier] = (r+1, c)
+            
+            if carrier != "AI_GK": # 🟢 FIX: AI GK never moves!
+                r, c = match["positions"][carrier]
+                if r < 5: 
+                    target_pos = (r+1, c)
+                    # 🟢 FIX: Swap places with the defender
+                    for char, pos in match["positions"].items():
+                        if pos == target_pos:
+                            match["positions"][char] = (r, c)
+                            break
+                    match["positions"][carrier] = target_pos
             
     match["turn"] += 1
     match["ui_state"] = "overview"
@@ -1080,18 +1125,34 @@ async def process_match_execution(callback: CallbackQuery):
             match["log"] = "\n".join(log_msgs) + f"\n✅ <b>PASS CONNECTS!</b> {carrier} finds {target_char}! ({active_power} vs {ai_defense})"
             match["ball_carrier"] = target_char
             
-            # 🗺️ DYNAMIC MOVEMENT: If passing forward, push the defensive line up!
+            # 🗺️ DYNAMIC MOVEMENT: Push defensive line up!
             target_row = match["positions"][target_char][0]
             if target_row < carrier_pos[0]:
                 for p in match["player_team"]:
+                    # 🟢 FIX: The Goalkeeper NEVER moves!
+                    if p == user_data["active_team"].get("GK"): 
+                        continue
+                        
                     r, c = match["positions"][p]
-                    if r > 1: match["positions"][p] = (r-1, c)
+                    if r > 1: 
+                        new_pos = (r-1, c)
+                        # 🟢 FIX: Only move if the tile is completely empty!
+                        if new_pos not in match["positions"].values():
+                            match["positions"][p] = new_pos
                     
         elif action == "dribble":
             match["log"] = "\n".join(log_msgs) + f"\n✅ <b>BROKE THROUGH!</b> {carrier} destroys {defense_name}! ({active_power} vs {ai_defense})"
+            
             # 🗺️ DYNAMIC MOVEMENT: Move carrier up 1 row
             r, c = match["positions"][carrier]
-            if r > 1: match["positions"][carrier] = (r-1, c)
+            if r > 1: 
+                target_pos = (r-1, c)
+                # 🟢 FIX: Swap places with whoever is in front of you so you don't overlap!
+                for char, pos in match["positions"].items():
+                    if pos == target_pos:
+                        match["positions"][char] = (r, c)
+                        break
+                match["positions"][carrier] = target_pos
             
     else:
         # Turnover!
