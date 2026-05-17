@@ -1,7 +1,8 @@
+import random
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -74,47 +75,49 @@ async def cmd_start(message: Message):
         )
         await message.answer(text, reply_markup=get_new_user_kb())
 
-
 @router.callback_query(F.data == "draft_team")
 async def process_draft_team(callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # Safety Check: Prevent users from double-drafting by clicking an old button
     if user_id in users_db:
         await callback.answer("You have already drafted your team!", show_alert=True)
         return
 
-    # Create user profile in RAM Cache
+    # Filter for ONLY 2-Star (B-Rank) characters
+    b_rank_pool = [name for name, data in master_characters.items() if data['rarity'] == 2]
+    
+    # Randomly select 5 unique characters from the 2-star pool
+    starting_team = random.sample(b_rank_pool, 5)
+
     users_db[user_id] = {
         "rank": "Unranked",
         "stratum": "Stratum 5",
         "energy": 5,
-        "ep": 0,
+        "ep": 10000,  # We will give them 0 to start
         "cash": 0,
-        "roster": ["Isagi", "Bachira", "Kunigami", "Chigiri", "Raichi"],
-        "active_team": ["Isagi", "Bachira", "Kunigami", "Chigiri", "Raichi"] # NEW LIST
+        "roster": starting_team.copy(),
+        "active_team": starting_team.copy()
     }
 
-    # The dynamic message edit using HTML
     text = (
         "🟦🔥 <b>SELECTION GATE OPENED!</b> 🔥🟦\n\n"
-        "You have drafted <b>Team Z</b>. Right now, they are nothing but unpolished trash. It is your job to turn them into monsters.\n\n"
+        "You have drafted your initial squad. Right now, they are nothing but unpolished trash. It is your job to turn them into monsters.\n\n"
         "🎁 <b>YOUR STARTING 5:</b>\n"
-        "⭐ Isagi Yoichi (Playmaker)\n"
-        "⭐ Meguru Bachira (Dribbler)\n"
-        "⭐ Rensuke Kunigami (Striker)\n"
-        "⭐ Hyoma Chigiri (Speedster)\n"
-        "⭐ Jingo Raichi (Tank)\n\n"
-        "📖 <b>MANAGER'S SURVIVAL GUIDE:</b>\n"
-        "<b>1. View Stats:</b> Check your [📋 Roster] to see their individual Ego, Speed, and Shoot stats. Understand their weapons.\n"
-        "<b>2. The Arena:</b> Enter the [🏟️ Arena] to battle other managers. Win to earn Cash and Ego Points (EP).\n"
-        "<b>3. Evolve:</b> Use Cash to [🏋️ Train] your players' stats, and use EP at the Selection Gate to pull S-Rank prodigies."
     )
     
-    # Edit the original message to show the results
-    await callback.message.edit_text(text, reply_markup=get_draft_success_kb())
+    # Dynamically generate the text for whoever they pulled
+    for char_name in starting_team:
+        char_data = master_characters[char_name]
+        text += f"⭐ {char_data['name']} (<i>{char_data['variant']}</i>)\n"
+
+    text += (
+        "\n📖 <b>MANAGER'S SURVIVAL GUIDE:</b>\n"
+        "<b>1. View Stats:</b> Check your [📋 Roster] to see their individual weapons.\n"
+        "<b>2. The Arena:</b> Enter the [🏟️ Arena] to battle other managers for Cash and EP.\n"
+        "<b>3. Evolve:</b> Use EP at the Selection Gate to pull S-Rank prodigies."
+    )
     
-    # Acknowledge the callback to stop the loading icon on the user's button
+    await callback.message.edit_text(text, reply_markup=get_draft_success_kb())
     await callback.answer()
 
 @router.message(Command("stats"))
@@ -234,6 +237,192 @@ async def process_swap_confirm(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
+@router.callback_query(F.data == "menu_main")
+async def process_menu_main(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    first_name = callback.from_user.first_name
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+    
+    user_data = users_db[user_id]
+    
+    text = (
+        "🟦 <b>BLUE LOCK FACILITY: ONLINE</b>\n\n"
+        f"Welcome back to the monitoring room, Manager {first_name}. "
+        "Your team is awaiting orders.\n\n"
+        "📊 <b>MANAGER STATUS:</b>\n"
+        f"🏆 <b>Rank:</b> {user_data['rank']} ({user_data['stratum']})\n"
+        f"⚡ <b>Energy:</b> {user_data['energy']}/5\n"
+        f"💎 <b>Ego Points (EP):</b> {user_data['ep']}\n"
+        f"💵 <b>Cash:</b> {user_data['cash']}\n\n"
+        "<i>The Arena is currently active. What is your next move?</i>"
+    )
+    
+    await callback.message.edit_text(text, reply_markup=get_main_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu_team")
+async def process_menu_team(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    user_data = users_db[user_id]
+    active_team = user_data.get("active_team", [])
+    
+    text = "⚽ <b>YOUR ACTIVE LINEUP (STARTING 5)</b>\n\n"
+    total_power = 0
+
+    for char_name in active_team:
+        if char_name in master_characters:
+            char_data = master_characters[char_name]
+            power = (char_data['pass'] + char_data['dribble'] + char_data['shoot'] + char_data['defense'] + char_data['speed'] + char_data['ego']) // 6
+            total_power += power
+            rarity_stars = "⭐" * char_data['rarity']
+            text += f"{rarity_stars} <b>{char_name}</b> (<i>{char_data['variant']}</i>) - OVR: {power}\n"
+
+    text += f"\n📊 <b>TOTAL SQUAD RATING: {total_power}</b>\n"
+    text += "<i>This is the team you will take into the Arena.</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu_roster")
+async def process_menu_roster(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+
+    user_data = users_db[user_id]
+    roster = user_data.get("roster", [])
+    
+    text = f"📋 <b>YOUR FULL ROSTER (Owned: {len(roster)})</b>\n\n"
+    
+    # Simple list of all owned characters
+    for char_name in roster:
+        if char_name in master_characters:
+            rarity_stars = "⭐" * master_characters[char_name]['rarity']
+            text += f"{rarity_stars} <b>{char_name}</b>\n"
+
+    text += "\n<i>Use <code>/stats [Name]</code> to view their details or swap them into your active team.</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "menu_gacha")
+async def process_menu_gacha(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+        
+    user_ep = users_db[user_id]["ep"]
+    
+    text = (
+        "🚪 <b>THE SELECTION GATE</b>\n\n"
+        "Test your luck and draw new Egoists to strengthen your roster.\n\n"
+        f"💎 <b>Your Ego Points:</b> {user_ep} EP\n"
+        "🎟️ <b>Cost per pull:</b> 100 EP\n\n"
+        "<b>Drop Rates:</b>\n"
+        "⭐⭐ (B-Rank): 60%\n"
+        "⭐⭐⭐ (A-Rank): 30%\n"
+        "⭐⭐⭐⭐ (S-Rank): 8%\n"
+        "⭐⭐⭐⭐⭐ (EX-Rank): 2%"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 PULL 1x (100 EP)", callback_data="gacha_pull")],
+        [InlineKeyboardButton(text="🔙 BACK TO MAIN MENU", callback_data="menu_main")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "gacha_pull")
+async def process_gacha_pull(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if user_id not in users_db:
+        return await callback.answer("System Error: Manager not found.", show_alert=True)
+        
+    user_data = users_db[user_id]
+    
+    # 1. Check if they have enough EP
+    if user_data["ep"] < 100:
+        return await callback.answer("❌ Not enough Ego Points (EP)! Win Arena matches to earn more.", show_alert=True)
+        
+    # 2. Deduct EP
+    user_data["ep"] -= 100
+    
+    # 3. Roll for Rarity (1 to 100)
+    roll = random.randint(1, 100)
+    if roll <= 2:
+        target_rarity = 5 # 2% EX-Rank
+    elif roll <= 10:
+        target_rarity = 4 # 8% S-Rank
+    elif roll <= 40:
+        target_rarity = 3 # 30% A-Rank
+    else:
+        target_rarity = 2 # 60% B-Rank
+        
+    # 4. Filter characters by the rolled rarity
+    pool = [name for name, data in master_characters.items() if data['rarity'] == target_rarity]
+    
+    # 5. Select the character
+    pulled_char = random.choice(pool)
+    char_data = master_characters[pulled_char]
+    rarity_stars = "⭐" * char_data['rarity']
+    
+    # 6. Check for duplicates ("Devour" mechanic placeholder)
+    if pulled_char in user_data["roster"]:
+        # If they already own them, give them compensation cash for now
+        user_data["cash"] += 500
+        dupe_text = f"\n\n⚠️ <i>You already own this Egoist! They were devoured and converted into 💵 500 Cash.</i>"
+    else:
+        user_data["roster"].append(pulled_char)
+        dupe_text = f"\n\n✅ <i>Added to your [📋 Roster]. Use /stats {pulled_char} to view their weapons.</i>"
+        
+    # 7. Build the visual output
+    text = (
+        "🟦🔥 <b>SELECTION GATE OPENED!</b> 🔥🟦\n\n"
+        f"You pulled a {rarity_stars} player!\n\n"
+        f"👤 <b>{char_data['name']}</b>\n"
+        f"🧬 <b>Variant:</b> <i>{char_data['variant']}</i>\n"
+        f"📈 <b>Base Ego:</b> {char_data['ego']}"
+        f"{dupe_text}\n\n"
+        f"💎 <b>Remaining EP:</b> {user_data['ep']}"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 PULL AGAIN (100 EP)", callback_data="gacha_pull")],
+        [InlineKeyboardButton(text="🔙 BACK TO GATE", callback_data="menu_gacha")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+async def setup_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Access the Blue Lock facility"),
+        BotCommand(command="stats", description="View player stats (e.g., /stats Bachira)")
+    ]
+    await bot.set_my_commands(commands)
+    print("✅ Bot commands successfully uploaded to Telegram.")
+
 # --- BOT RUNNER ---
 async def main():
     # Setup logging to see errors in Termux
@@ -246,15 +435,12 @@ async def main():
     
     print("⚽ Blue Lock Bot is starting...")
     
+    # Auto-load the commands into Telegram's menu
+    await setup_bot_commands(bot)
+    
     # Drop pending updates so it doesn't spam old messages when you restart the script
     await bot.delete_webhook(drop_pending_updates=True)
     
     # Start polling
     await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nBot stopped by Manager.")
 
